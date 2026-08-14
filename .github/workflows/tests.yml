@@ -22,11 +22,10 @@ jobs:
       - name: Run test suite
         run: python3 -m unittest discover -s tests -v
 
-  # Advisory only: Linux support is tracked in issue #1 (the suite still
-  # assumes macOS filesystem layout in places). Failures here do not gate.
+  # Required gate since issue #1: the suite runs portably on Linux
+  # (two real-client-rsync dispatcher tests are macOS-only by design).
   unittest-linux:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
