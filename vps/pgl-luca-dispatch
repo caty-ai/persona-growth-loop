@@ -1,0 +1,1670 @@
+#!/usr/bin/env python3
+"""Forced-command dispatcher for the Luca production profile.
+
+SSH_ORIGINAL_COMMAND is parsed as data and is never executed.  The production
+paths below are intentionally not configurable.  Tests may mirror that fixed
+tree beneath a temporary root only when this file is *not* running from its
+installed production pathname, two explicit environment gates are present,
+and a sentinel file exists.  Thus the seam is unavailable to the installed
+forced command and cannot be selected through SSH_ORIGINAL_COMMAND.
+
+The deploy role exposes only frozen top-level names.  ``deploy backup`` makes
+and rotates the recovery point, ``deploy transfer`` starts a fixed rsync
+receiver, ``deploy promote <content-hash>`` builds and verifies out of place,
+and ``deploy restart`` restarts the two fixed user units.  ``restore`` selects
+the newest recovery point and ``accept [deletion]`` runs the fixed real-turn
+mode-restoring acceptance (with the optional production render-file subset
+gate).  These phases let the MBP orchestrator apply the unconditional restore
+rules without widening the SSH command surface.
+"""
+
+from __future__ import annotations
+
+import datetime as _datetime
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import posixpath
+import re
+import select
+import shlex
+import shutil
+import sqlite3
+import stat
+import subprocess
+import sys
+import tempfile
+import time as _time
+from typing import Any
+import urllib.error
+import urllib.request
+import uuid
+
+
+_PRODUCTION_ENTRYPOINT = Path("/usr/local/libexec/pgl-luca-dispatch")
+_OWNERS_PATH = Path("/home/admin/.hermes/profiles/luca/channel_directory.json")
+_DATABASE_PATH = Path("/home/admin/.hermes/profiles/luca/state.db")
+_INSTALL_ROOT = Path("/home/admin/.persona-engine/luca")
+_NODE_PATH = Path("/usr/bin/node")
+_PERSONA_CLI_PATH = Path("/home/admin/.persona-engine/cli/packages/core/bin/persona")
+_PERSONA_PACKAGE_PATH = Path("/home/admin/.persona-engine/cli/packages/core/package.json")
+_ADAPTER_VERSION_PATH = Path(
+    "/home/admin/.hermes/profiles/luca/plugins/persona-engine/version.py"
+)
+_BACKUPS_ROOT = Path("/home/admin/.hermes/backups")
+_ACCEPT_CONFIG_PATH = Path("/home/admin/.config/caty-gateway/luca-hermes-api.env")
+_RSYNC_PATH = Path("/usr/bin/rsync")
+_RSYNC_RECEIVER_BACKPORT_PATH = Path("/etc/pgl-luca-rsync-backport.json")
+_SYSTEMCTL_PATH = Path("/usr/bin/systemctl")
+_SYSTEMD_UNITS = ("hermes-gateway-luca", "hermes-api-luca")
+_VERIFY_MODE = "mode-b"
+_RENDER_ROOT = Path("catalogs/overlay")
+_BACKUP_KEEP = 14
+_BACKUP_CAP_BYTES = 1024 * 1024 * 1024
+_BACKUP_COMPLETE = b"pgl-luca-backup-v1\n"
+_BACKUP_SEQUENCE = ".sequence"
+_BACKUP_MARKER_BYTES = len(_BACKUP_COMPLETE)
+_TEST_ROOT_ENV = "PGL_LUCA_DISPATCH_TEST_ROOT"
+_TEST_GATE_ENV = "PGL_LUCA_DISPATCH_TESTING"
+_TEST_SENTINEL = ".pgl-luca-dispatch-test-root"
+_TEST_SENTINEL_CONTENT = b"pgl-luca-dispatch test root\n"
+
+_ERROR_LINE = "pgl-luca-dispatch: request rejected\n"
+_EPOCH = re.compile(r"^[0-9]{1,12}$")
+_OWNER_ID = re.compile(r"^[A-Za-z0-9+_-][A-Za-z0-9._:@+\-]{0,255}$")
+_MODE_ID = re.compile(r"^[a-z0-9-]+$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_UUID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+_BACKUP_GENERATION = re.compile(
+    r"^luca-[0-9]{8}T[0-9]{12}Z-[0-9a-f]{8}$"
+)
+_PORT = re.compile(r"^[0-9]{1,5}$")
+_TOKEN = re.compile(r"^[\x21-\x7e]{1,4096}$")
+_ADAPTER_VERSION = re.compile(
+    rb'^VERSION\s*=\s*["\']([^"\']+)["\']\s*(?:#.*)?$', re.MULTILINE
+)
+_SEMVER = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+_ISO_TIMESTAMP = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+)
+_OWNER_PLATFORMS = frozenset({"telegram", "slack"})
+_CHANNEL_TYPES = frozenset({"dm", "group", "channel", "private", "forum", "thread"})
+_SESSION_SOURCES = frozenset({"telegram", "slack", "api_server"})
+_MESSAGE_ROLES = frozenset({"user", "assistant"})
+_MAX_SAFE_INTEGER = (1 << 53) - 1
+_DOCTOR_TIMEOUT_SECONDS = 30
+_BUILD_TIMEOUT_SECONDS = 60
+_TRANSFER_TIMEOUT_SECONDS = 600
+_RESTART_TIMEOUT_SECONDS = 30
+_ACCEPT_TIMEOUT_SECONDS = 30
+_ACCEPT_RESTORE_RETRIES = 2
+_DOCTOR_OUTPUT_LIMIT = 1024 * 1024
+_RSYNC_VERSION_TIMEOUT_SECONDS = 10
+_RSYNC_VERSION_OUTPUT_LIMIT = 16 * 1024
+_RSYNC_VERSION_FLOOR = (3, 4, 0)
+_RSYNC_RECEIVER_BACKPORT_OWNER_UID = 0
+_TRANSFER_CAP_BYTES = 512 * 1024 * 1024
+_TRANSFER_LOG_LIMIT = 64 * 1024
+_RSYNC_LOG_PATH = Path("/home/admin/.hermes/profiles/luca/rsync-receiver.log")
+_DOCTOR_ENV = {
+    "HOME": "/home/admin",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "PATH": "/usr/bin:/bin",
+    "TMPDIR": "/tmp",
+}
+
+_SESSION_QUERY = """SELECT m.session_id,s.source,s.chat_type,s.user_id,s.session_key,m.content,m.timestamp,m.role
+FROM messages m JOIN sessions s ON s.id=m.session_id
+WHERE m.role IN ('user','assistant') AND m.timestamp>=? AND m.timestamp<?
+AND s.source IN ('telegram','slack','api_server')
+ORDER BY m.timestamp,m.id"""
+
+_PACK_FIXED_FILES = frozenset({"manifest.yml", "aliases.yml"})
+_PACK_SUBTREES = frozenset({"modes", "catalogs"})
+_TRANSFER_SHORT_FLAGS = frozenset({"c", "d", "i", "p", "r", "t", "z"})
+_TRANSFER_LONG_OPTIONS = frozenset(
+    {
+        "--checksum",
+        "--delete",
+        "--delete-before",
+        "--delete-delay",
+        "--delete-during",
+        "--dirs",
+        "--inplace",
+        "--itemize-changes",
+        "--omit-dir-times",
+        "--partial",
+        "--perms",
+        "--recursive",
+        "--safe-links",
+        "--times",
+        "--compress",
+    }
+)
+_TRANSFER_FORBIDDEN_LONG_OPTIONS = frozenset(
+    {
+        "--copy-dirlinks",
+        "--copy-links",
+        "--copy-unsafe-links",
+        "--devices",
+        "--keep-dirlinks",
+        "--links",
+        "--munge-links",
+        "--no-links",
+        "--safe-links=0",
+        "--specials",
+    }
+)
+_TRANSFER_LOG_FORMAT = "--log-format=%i"
+_LOG_TRUNCATED_SUFFIX = b"\n[truncated]\n"
+_RSYNC_VERSION_RE = re.compile(
+    rb"(?m)^rsync\s+version\s+([0-9]+)\.([0-9]+)\.([0-9]+)\b"
+)
+_RSYNC_RECEIVER_BACKPORT_FIXES = frozenset({"CVE-2024-12087", "CVE-2024-12088"})
+
+
+class DispatchError(Exception):
+    """A deliberately detail-free dispatcher failure."""
+
+
+def _reject(_message: str = "rejected") -> None:
+    raise DispatchError(_message)
+
+
+def _read_regular(path: Path) -> bytes:
+    """Read a regular file without following a final-component symlink."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise DispatchError("file unavailable") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            _reject("not regular")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    except OSError as exc:
+        raise DispatchError("file read failed") from exc
+    finally:
+        os.close(fd)
+
+
+def _require_directory(path: Path) -> None:
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError as exc:
+        raise DispatchError("directory unavailable") from exc
+    if not stat.S_ISDIR(mode):
+        _reject("not directory")
+
+
+def _require_regular_shape(path: Path, *, executable: bool) -> None:
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError as exc:
+        raise DispatchError("required program unavailable") from exc
+    if not stat.S_ISREG(mode):
+        _reject("required program is not regular")
+    required_bits = 0o111 if executable else 0o444
+    if mode & required_bits == 0:
+        _reject("required program mode is invalid")
+
+
+def _decode_json(data: bytes) -> Any:
+    def pairs(values: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in values:
+            if key in result:
+                _reject("duplicate json key")
+            result[key] = value
+        return result
+
+    try:
+        text = data.decode("utf-8", errors="strict")
+        return json.loads(
+            text,
+            object_pairs_hook=pairs,
+            parse_constant=lambda _value: _reject("non-finite json number"),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DispatchError("invalid json") from exc
+
+
+def _test_root() -> Path | None:
+    if os.environ.get(_TEST_GATE_ENV) != "1":
+        return None
+    raw = os.environ.get(_TEST_ROOT_ENV)
+    if not raw:
+        return None
+    try:
+        running_path = Path(__file__).resolve(strict=True)
+    except OSError as exc:
+        raise DispatchError("entrypoint unavailable") from exc
+    if running_path == _PRODUCTION_ENTRYPOINT.resolve(strict=False):
+        return None
+    root = Path(raw)
+    if not root.is_absolute():
+        _reject("test root must be absolute")
+    try:
+        root = root.resolve(strict=True)
+    except OSError as exc:
+        raise DispatchError("test root unavailable") from exc
+    sentinel = root / _TEST_SENTINEL
+    if _read_regular(sentinel) != _TEST_SENTINEL_CONTENT:
+        _reject("invalid test sentinel")
+    return root
+
+
+def _fixed_path(path: Path, test_root: Path | None) -> Path:
+    if test_root is None:
+        return path
+    return test_root.joinpath(*path.parts[1:])
+
+
+def _parse_request() -> tuple[str, tuple[str, ...]]:
+    if len(sys.argv) != 2 or sys.argv[1] not in {"read", "deploy"}:
+        _reject("invalid role")
+    role = sys.argv[1]
+    original = os.environ.get("SSH_ORIGINAL_COMMAND")
+    if original is None or not original or "\x00" in original or "\n" in original or "\r" in original:
+        _reject("invalid original command")
+    try:
+        tokens = shlex.split(original, posix=True)
+    except ValueError as exc:
+        raise DispatchError("invalid quoting") from exc
+    if tokens == ["hash"]:
+        return "hash", ()
+    if role == "read" and tokens == ["read-owners"]:
+        return "read-owners", ()
+    if role == "read" and len(tokens) == 3 and tokens[0] == "read-sessions":
+        if _EPOCH.fullmatch(tokens[1]) is None or _EPOCH.fullmatch(tokens[2]) is None:
+            _reject("invalid epoch")
+        start, end = int(tokens[1]), int(tokens[2])
+        if start >= end:
+            _reject("invalid range")
+        return "read-sessions", (tokens[1], tokens[2])
+    if role == "deploy":
+        if tokens in (["deploy", "backup"], ["deploy", "restart"]):
+            return "deploy", (tokens[1],)
+        if len(tokens) >= 4 and tokens[:2] == ["deploy", "transfer"]:
+            return "deploy", ("transfer", *tokens[2:])
+        if len(tokens) == 3 and tokens[:2] == ["deploy", "promote"]:
+            if _SHA256.fullmatch(tokens[2]) is None:
+                _reject("invalid content hash")
+            return "deploy", ("promote", tokens[2])
+        if tokens == ["restore"]:
+            return "restore", ()
+        if tokens == ["accept"]:
+            return "accept", ("standard",)
+        if tokens == ["accept", "deletion"]:
+            return "accept", ("deletion",)
+    _reject("unknown request")
+
+
+def _read_owners(path: Path) -> bytes:
+    value = _decode_json(_read_regular(path))
+    if not isinstance(value, dict) or set(value) - {"updated_at", "platforms"} or "platforms" not in value:
+        _reject("invalid owner directory")
+    if "updated_at" in value and value["updated_at"] is not None and not isinstance(value["updated_at"], str):
+        _reject("invalid owner timestamp")
+    platforms = value["platforms"]
+    if not isinstance(platforms, dict):
+        _reject("invalid platforms")
+    owners: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for platform, entries in platforms.items():
+        if platform not in _OWNER_PLATFORMS or not isinstance(entries, list):
+            _reject("invalid platform")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                _reject("invalid channel entry")
+            identifier = entry.get("id")
+            channel_type = entry.get("type")
+            if not isinstance(identifier, str) or _OWNER_ID.fullmatch(identifier) is None:
+                _reject("invalid channel id")
+            if not isinstance(channel_type, str) or channel_type not in _CHANNEL_TYPES:
+                _reject("invalid channel type")
+            identity = (platform, identifier)
+            if identity in seen:
+                _reject("duplicate channel id")
+            seen.add(identity)
+            if channel_type == "dm":
+                owners.append({"platform": platform, "id": identifier, "type": "dm"})
+    owners.sort(key=lambda item: (item["platform"].encode("utf-8"), item["id"].encode("utf-8")))
+    return (json.dumps(owners, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _database_uri(path: Path) -> str:
+    # The only callers provide one of the fixed paths selected above.  Percent
+    # escaping is intentionally unnecessary for the production pathname.
+    raw = str(path)
+    if not raw.startswith("/") or "?" in raw or "#" in raw or "\x00" in raw:
+        _reject("invalid database path")
+    return "file://" + raw + "?mode=ro"
+
+
+def _nullable_string(value: Any) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _read_sessions(path: Path, start_text: str, end_text: str) -> bytes:
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError as exc:
+        raise DispatchError("database unavailable") from exc
+    if not stat.S_ISREG(mode):
+        _reject("database not regular")
+    try:
+        connection = sqlite3.connect(_database_uri(path), uri=True, timeout=5.0)
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("PRAGMA temp_store=MEMORY")
+            rows = connection.execute(_SESSION_QUERY, (int(start_text), int(end_text))).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        raise DispatchError("database query failed") from exc
+
+    output: list[bytes] = []
+    keys = ("session_id", "source", "chat_type", "user_id", "session_key", "content", "timestamp", "role")
+    for row in rows:
+        if len(row) != 8:
+            _reject("invalid query row")
+        session_id, source, chat_type, user_id, session_key, content, timestamp, role = row
+        if not isinstance(session_id, str) or not session_id or "\x00" in session_id:
+            _reject("invalid session id")
+        if not isinstance(source, str) or source not in _SESSION_SOURCES:
+            _reject("invalid session source")
+        if not all(_nullable_string(item) for item in (chat_type, user_id, session_key)):
+            _reject("invalid session metadata")
+        if content is not None and (not isinstance(content, str) or "\x00" in content):
+            _reject("invalid content")
+        if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp):
+            _reject("invalid timestamp")
+        if not isinstance(role, str) or role not in _MESSAGE_ROLES:
+            _reject("invalid message role")
+        if content is None:
+            continue
+        record = dict(zip(keys, row))
+        output.append((json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
+    return b"".join(output)
+
+
+def _valid_semver(value: Any) -> bool:
+    return isinstance(value, str) and _SEMVER.fullmatch(value) is not None
+
+
+def _valid_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or _ISO_TIMESTAMP.fullmatch(value) is None:
+        return False
+    try:
+        _datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
+def _valid_nonnegative_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_SAFE_INTEGER
+
+
+def _validate_manifest(value: Any) -> dict[str, Any]:
+    required = {
+        "schema_version", "pack_name", "pack_version", "engine_version", "engine_range",
+        "built_at", "content_hash", "counter", "modes",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        _reject("invalid build manifest")
+    if value["schema_version"] != 2 or isinstance(value["schema_version"], bool):
+        _reject("invalid build schema")
+    if not isinstance(value["pack_name"], str) or _MODE_ID.fullmatch(value["pack_name"]) is None:
+        _reject("invalid pack name")
+    if not _valid_semver(value["pack_version"]) or not _valid_semver(value["engine_version"]):
+        _reject("invalid version")
+    engine_range = value["engine_range"]
+    if not isinstance(engine_range, dict) or set(engine_range) != {"min", "max"}:
+        _reject("invalid engine range")
+    if not _valid_semver(engine_range["min"]):
+        _reject("invalid engine minimum")
+    if engine_range["max"] is not None and not _valid_semver(engine_range["max"]):
+        _reject("invalid engine maximum")
+    if not _valid_timestamp(value["built_at"]):
+        _reject("invalid built timestamp")
+    if not isinstance(value["content_hash"], str) or _SHA256.fullmatch(value["content_hash"]) is None:
+        _reject("invalid content hash")
+    if value["counter"] != "pe-count-v1" or not isinstance(value["modes"], dict):
+        _reject("invalid counter or modes")
+    for mode_id, metadata in value["modes"].items():
+        if not isinstance(mode_id, str) or _MODE_ID.fullmatch(mode_id) is None or not isinstance(metadata, dict):
+            _reject("invalid mode metadata")
+        if set(metadata) not in ({"bytes", "tokens", "sha256"}, {"bytes", "tokens", "sha256", "voice_hint"}):
+            _reject("invalid mode metadata keys")
+        if not _valid_nonnegative_integer(metadata["bytes"]) or not _valid_nonnegative_integer(metadata["tokens"]):
+            _reject("invalid mode sizes")
+        if metadata["tokens"] != (metadata["bytes"] + 2) // 3:
+            _reject("invalid mode token count")
+        if not isinstance(metadata["sha256"], str) or _SHA256.fullmatch(metadata["sha256"]) is None:
+            _reject("invalid mode hash")
+        if "voice_hint" in metadata and not isinstance(metadata["voice_hint"], str):
+            _reject("invalid voice hint")
+    return value
+
+
+def _validate_name(name: str) -> None:
+    if name in {".", ".."} or "/" in name or "\x00" in name:
+        _reject("invalid path name")
+    try:
+        name.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise DispatchError("non-utf8 path") from exc
+
+
+def _discover_regular_files(root: Path, relative: Path = Path()) -> tuple[dict[str, bytes], set[str]]:
+    directory = root / relative
+    _require_directory(directory)
+    files: dict[str, bytes] = {}
+    directories: set[str] = set()
+    try:
+        entries = list(os.scandir(directory))
+    except OSError as exc:
+        raise DispatchError("directory scan failed") from exc
+    for entry in entries:
+        _validate_name(entry.name)
+        child_relative = relative / entry.name
+        key = child_relative.as_posix()
+        try:
+            mode = entry.stat(follow_symlinks=False).st_mode
+        except OSError as exc:
+            raise DispatchError("path stat failed") from exc
+        if stat.S_ISDIR(mode):
+            directories.add(key)
+            nested_files, nested_directories = _discover_regular_files(root, child_relative)
+            files.update(nested_files)
+            directories.update(nested_directories)
+        elif stat.S_ISREG(mode):
+            files[key] = _read_regular(Path(entry.path))
+        else:
+            _reject("symlink or special file")
+    return files, directories
+
+
+def _validate_pack_tree(pack_root: Path) -> None:
+    _require_directory(pack_root)
+    try:
+        entries = list(os.scandir(pack_root))
+    except OSError as exc:
+        raise DispatchError("pack scan failed") from exc
+    seen: set[str] = set()
+    for entry in entries:
+        _validate_name(entry.name)
+        seen.add(entry.name)
+        try:
+            mode = entry.stat(follow_symlinks=False).st_mode
+        except OSError as exc:
+            raise DispatchError("pack stat failed") from exc
+        if entry.name in _PACK_FIXED_FILES:
+            if not stat.S_ISREG(mode):
+                _reject("unexpected pack entry")
+            continue
+        if entry.name in _PACK_SUBTREES:
+            if not stat.S_ISDIR(mode):
+                _reject("unexpected pack entry")
+            continue
+        _reject("unexpected pack entry")
+    for name in seen & _PACK_SUBTREES:
+        _discover_regular_files(pack_root, Path(name))
+
+
+def _pack_hash(pack_root: Path) -> str:
+    _validate_pack_tree(pack_root)
+    files: dict[str, bytes] = {}
+    for fixed in ("manifest.yml", "aliases.yml"):
+        path = pack_root / fixed
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise DispatchError("pack file unavailable") from exc
+        files[fixed] = _read_regular(path)
+    for subtree in ("modes", "catalogs"):
+        path = pack_root / subtree
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise DispatchError("pack tree unavailable") from exc
+        discovered, _directories = _discover_regular_files(pack_root, Path(subtree))
+        files.update(discovered)
+    digest = hashlib.sha256()
+    for path in sorted(files, key=lambda item: item.encode("utf-8")):
+        digest.update(path.encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update(files[path])
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def _run_persona_doctor(install_root: Path, node_path: Path, cli_path: Path) -> None:
+    _require_regular_shape(node_path, executable=True)
+    _require_regular_shape(cli_path, executable=False)
+    try:
+        result = subprocess.run(
+            [str(node_path), str(cli_path), "doctor", "--dir", str(install_root)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=install_root,
+            env=_DOCTOR_ENV,
+            timeout=_DOCTOR_TIMEOUT_SECONDS,
+            check=False,
+            shell=False,
+            close_fds=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DispatchError("persona doctor failed") from exc
+    if result.returncode != 0:
+        _reject("persona doctor rejected build")
+    if len(result.stdout) > _DOCTOR_OUTPUT_LIMIT or len(result.stderr) > _DOCTOR_OUTPUT_LIMIT:
+        _reject("persona doctor output too large")
+    report = _decode_json(result.stdout)
+    if not isinstance(report, dict) or report.get("ok") is not True or report.get("issues") != []:
+        _reject("persona doctor report is not clean")
+
+
+def _hash_install(install_root: Path, node_path: Path, cli_path: Path) -> bytes:
+    _require_directory(install_root)
+    pack_root = install_root / "pack"
+    build_root = install_root / "build"
+    computed = _pack_hash(pack_root)
+    build_files, build_directories = _discover_regular_files(build_root)
+    base_files = {"manifest.json", "triggers.json", "policy.json"}
+    if not base_files.issubset(build_files):
+        _reject("missing build artifact")
+    manifest = _validate_manifest(_decode_json(build_files["manifest.json"]))
+    if not isinstance(_decode_json(build_files["triggers.json"]), dict):
+        _reject("invalid triggers artifact")
+    if not isinstance(_decode_json(build_files["policy.json"]), dict):
+        _reject("invalid policy artifact")
+    expected_files = set(base_files)
+    expected_directories: set[str] = set()
+    if manifest["modes"]:
+        expected_directories.add("modes")
+    for mode_id, metadata in manifest["modes"].items():
+        artifact = f"modes/{mode_id}.md"
+        expected_files.add(artifact)
+        block = build_files.get(artifact)
+        if block is None:
+            _reject("missing mode artifact")
+        if len(block) != metadata["bytes"]:
+            _reject("mode byte mismatch")
+        if hashlib.sha256(block).hexdigest() != metadata["sha256"]:
+            _reject("mode hash mismatch")
+    if set(build_files) != expected_files or build_directories != expected_directories:
+        _reject("unexpected build artifact")
+    if manifest["content_hash"] != computed:
+        _reject("pack and build mismatch")
+    _run_persona_doctor(install_root, node_path, cli_path)
+    return (computed + "\n").encode("ascii")
+
+
+def _write_new_regular(path: Path, data: bytes, mode: int = 0o600) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, mode)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                _reject("copy destination is not regular")
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    _reject("short file write")
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise DispatchError("file copy failed") from exc
+
+
+def _write_atomic_regular(path: Path, data: bytes, mode: int = 0o600) -> None:
+    descriptor, temporary_raw = tempfile.mkstemp(
+        prefix=path.name + ".",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_raw)
+    try:
+        try:
+            os.fchmod(descriptor, mode)
+            view = memoryview(data)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    _reject("short file write")
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+    except OSError as exc:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise DispatchError("file copy failed") from exc
+
+
+def _copy_regular_tree(source: Path, destination: Path) -> int:
+    files, directories = _discover_regular_files(source)
+    try:
+        destination.mkdir(mode=0o700)
+        for relative in sorted(directories, key=lambda value: (value.count("/"), value)):
+            (destination / relative).mkdir(mode=0o700)
+        total = 0
+        for relative in sorted(files, key=lambda value: value.encode("utf-8")):
+            data = files[relative]
+            total += len(data)
+            _write_new_regular(destination / relative, data)
+        return total
+    except OSError as exc:
+        raise DispatchError("tree copy failed") from exc
+
+
+def _copy_install(source: Path, destination: Path) -> int:
+    _require_directory(source)
+    try:
+        if destination.exists():
+            _require_directory(destination)
+            if any(destination.iterdir()):
+                _reject("install copy destination is not empty")
+        else:
+            destination.mkdir(mode=0o700)
+    except OSError as exc:
+        raise DispatchError("install copy unavailable") from exc
+    install_data = _read_regular(source / "install.yml")
+    _write_new_regular(destination / "install.yml", install_data)
+    total = len(install_data)
+    total += _copy_regular_tree(source / "pack", destination / "pack")
+    total += _copy_regular_tree(source / "build", destination / "build")
+    return total
+
+
+def _backup_generations(backups_root: Path) -> list[Path]:
+    _require_directory(backups_root)
+    generations: list[Path] = []
+    try:
+        entries = list(os.scandir(backups_root))
+    except OSError as exc:
+        raise DispatchError("backup scan failed") from exc
+    for entry in entries:
+        if _BACKUP_GENERATION.fullmatch(entry.name) is None:
+            continue
+        try:
+            mode = entry.stat(follow_symlinks=False).st_mode
+        except OSError as exc:
+            raise DispatchError("backup stat failed") from exc
+        if not stat.S_ISDIR(mode):
+            _reject("backup generation is not a directory")
+        generations.append(Path(entry.path))
+    return sorted(generations, key=_backup_sort_key)
+
+
+def _backup_sort_key(path: Path) -> tuple[int, int, bytes]:
+    sequence_path = path / _BACKUP_SEQUENCE
+    try:
+        data = _read_regular(sequence_path)
+    except DispatchError as exc:
+        try:
+            os.lstat(sequence_path)
+        except FileNotFoundError:
+            pass
+        except OSError as stat_exc:
+            raise DispatchError("backup sequence unavailable") from stat_exc
+        else:
+            raise exc
+    else:
+        if _EPOCH.fullmatch(data.decode("ascii", errors="strict").strip()) is not None:
+            return (1, int(data.strip()), path.name.encode("utf-8"))
+        _reject("invalid backup sequence")
+    try:
+        metadata = os.lstat(path)
+    except OSError as exc:
+        raise DispatchError("backup stat failed") from exc
+    return (0, metadata.st_mtime_ns, path.name.encode("utf-8"))
+
+
+def _next_backup_sequence(backups_root: Path) -> int:
+    counter_path = backups_root / _BACKUP_SEQUENCE
+    try:
+        current = _read_regular(counter_path)
+    except DispatchError as exc:
+        try:
+            os.lstat(counter_path)
+        except FileNotFoundError:
+            sequence = 1
+        except OSError as stat_exc:
+            raise DispatchError("backup sequence unavailable") from stat_exc
+        else:
+            raise exc
+    else:
+        try:
+            value = current.decode("ascii", errors="strict").strip()
+        except UnicodeDecodeError as exc:
+            raise DispatchError("backup sequence invalid") from exc
+        if _EPOCH.fullmatch(value) is None:
+            _reject("backup sequence invalid")
+        sequence = int(value) + 1
+    _write_atomic_regular(counter_path, f"{sequence}\n".encode("ascii"), mode=0o600)
+    return sequence
+
+
+def _tree_size(root: Path) -> int:
+    _require_directory(root)
+    total = 0
+    try:
+        entries = list(os.scandir(root))
+    except OSError as exc:
+        raise DispatchError("tree size scan failed") from exc
+    for entry in entries:
+        _validate_name(entry.name)
+        try:
+            metadata = entry.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise DispatchError("tree size stat failed") from exc
+        if stat.S_ISDIR(metadata.st_mode):
+            total += _tree_size(Path(entry.path))
+        elif stat.S_ISREG(metadata.st_mode):
+            total += metadata.st_size
+        else:
+            _reject("symlink or special file")
+    return total
+
+
+def _install_size(install_root: Path) -> int:
+    try:
+        install_stat = os.lstat(install_root / "install.yml")
+    except OSError as exc:
+        raise DispatchError("install size unavailable") from exc
+    if not stat.S_ISREG(install_stat.st_mode):
+        _reject("install file is not regular")
+    return (
+        install_stat.st_size
+        + _tree_size(install_root / "pack")
+        + _tree_size(install_root / "build")
+    )
+
+
+def _rotate_backups(backups_root: Path) -> None:
+    generations = _backup_generations(backups_root)
+    sizes = {path: _tree_size(path) for path in generations}
+    total = sum(sizes.values())
+    while len(generations) > _BACKUP_KEEP or total > _BACKUP_CAP_BYTES:
+        if not generations:
+            _reject("backup rotation underflow")
+        victim = generations.pop(0)
+        total -= sizes[victim]
+        try:
+            shutil.rmtree(victim)
+        except OSError as exc:
+            raise DispatchError("backup rotation failed") from exc
+
+
+def _create_backup(
+    install_root: Path, backups_root: Path, node_path: Path, cli_path: Path
+) -> bytes:
+    _hash_install(install_root, node_path, cli_path)
+    try:
+        backups_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        raise DispatchError("backup root unavailable") from exc
+    _require_directory(backups_root)
+    stamp = _datetime.datetime.now(_datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    generation_name = f"luca-{stamp}-{uuid.uuid4().hex[:8]}"
+    if _BACKUP_GENERATION.fullmatch(generation_name) is None:
+        _reject("invalid generated backup name")
+    try:
+        temporary = Path(tempfile.mkdtemp(prefix=".luca-backup-", dir=backups_root))
+    except OSError as exc:
+        raise DispatchError("backup staging failed") from exc
+    destination = backups_root / generation_name
+    try:
+        sequence = _next_backup_sequence(backups_root)
+        sequence_bytes = len(f"{sequence}\n".encode("ascii"))
+        marker_bytes = _BACKUP_MARKER_BYTES + sequence_bytes
+        if _install_size(install_root) + marker_bytes > _BACKUP_CAP_BYTES:
+            _reject("backup exceeds capacity")
+        total = _copy_install(install_root, temporary / "install")
+        if total + marker_bytes > _BACKUP_CAP_BYTES:
+            _reject("backup exceeds capacity")
+        _write_new_regular(temporary / "install/.complete", _BACKUP_COMPLETE)
+        _write_new_regular(
+            temporary / f"install/{_BACKUP_SEQUENCE}",
+            f"{sequence}\n".encode("ascii"),
+        )
+        os.replace(temporary / "install", destination)
+        temporary.rmdir()
+        _rotate_backups(backups_root)
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    return b""
+
+
+def _latest_backup(backups_root: Path) -> Path:
+    generations: list[Path] = []
+    for path in _backup_generations(backups_root):
+        marker = path / ".complete"
+        try:
+            os.lstat(marker)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise DispatchError("backup marker unavailable") from exc
+        if _read_regular(marker) != _BACKUP_COMPLETE:
+            _reject("invalid backup marker")
+        generations.append(path)
+    if not generations:
+        _reject("no backup available")
+    return generations[-1]
+
+
+def _restore_backup(
+    install_root: Path, backups_root: Path, node_path: Path, cli_path: Path
+) -> bytes:
+    source = _latest_backup(backups_root)
+    parent = install_root.parent
+    _require_directory(parent)
+    try:
+        stage = Path(tempfile.mkdtemp(prefix=".luca-restore-", dir=parent))
+    except OSError as exc:
+        raise DispatchError("restore staging failed") from exc
+    production_touched = False
+    try:
+        _copy_install(source, stage)
+        _hash_install(stage, node_path, cli_path)
+        rollback = stage / ".rollback"
+        rollback.mkdir(mode=0o700)
+        moved: list[str] = []
+        installed: list[str] = []
+        try:
+            for name in ("install.yml", "pack", "build"):
+                target = install_root / name
+                try:
+                    os.lstat(target)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    raise DispatchError("restore target unavailable") from exc
+                else:
+                    os.replace(target, rollback / name)
+                    moved.append(name)
+                production_touched = True
+                os.replace(stage / name, install_root / name)
+                installed.append(name)
+            _hash_install(install_root, node_path, cli_path)
+        except BaseException:
+            try:
+                for name in reversed(installed):
+                    os.replace(install_root / name, stage / name)
+                for name in reversed(moved):
+                    os.replace(rollback / name, install_root / name)
+                production_touched = False
+            except BaseException:
+                # Preserve the co-located staging tree: it may now contain the
+                # only copy of an old component needed for operator recovery.
+                pass
+            raise
+        production_touched = False
+    except OSError as exc:
+        raise DispatchError("restore failed") from exc
+    finally:
+        if not production_touched:
+            shutil.rmtree(stage, ignore_errors=True)
+    return b""
+
+
+def _run_fixed(
+    arguments: list[str],
+    *,
+    timeout: int,
+    cwd: Path | None = None,
+    inherit_stdio: bool = False,
+    environment: dict[str, str] | None = None,
+) -> None:
+    try:
+        result = subprocess.run(
+            arguments,
+            stdin=None if inherit_stdio else subprocess.DEVNULL,
+            stdout=None if inherit_stdio else subprocess.PIPE,
+            stderr=subprocess.DEVNULL if inherit_stdio else subprocess.PIPE,
+            cwd=cwd,
+            env=_DOCTOR_ENV if environment is None else environment,
+            timeout=timeout,
+            check=False,
+            shell=False,
+            close_fds=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DispatchError("fixed command failed") from exc
+    if result.returncode != 0:
+        _reject("fixed command rejected")
+    if not inherit_stdio and (
+        len(result.stdout) > _DOCTOR_OUTPUT_LIMIT or len(result.stderr) > _DOCTOR_OUTPUT_LIMIT
+    ):
+        _reject("fixed command output too large")
+
+
+def _run_fixed_captured(
+    arguments: list[str],
+    *,
+    timeout: int,
+    output_limit: int,
+    cwd: Path | None = None,
+    environment: dict[str, str] | None = None,
+) -> tuple[int, bytes, bytes]:
+    try:
+        process = subprocess.Popen(
+            arguments,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
+            env=_DOCTOR_ENV if environment is None else environment,
+            shell=False,
+            close_fds=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DispatchError("fixed command failed") from exc
+    assert process.stdout is not None
+    assert process.stderr is not None
+    stdout = bytearray()
+    stderr = bytearray()
+    streams: dict[int, tuple[Any, bytearray]] = {
+        process.stdout.fileno(): (process.stdout, stdout),
+        process.stderr.fileno(): (process.stderr, stderr),
+    }
+    deadline = _time.monotonic() + timeout
+    timed_out = False
+    output_too_large = False
+    try:
+        while streams:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                process.kill()
+                break
+            ready, _unused, _unused2 = select.select(
+                [entry[0] for entry in streams.values()],
+                [],
+                [],
+                remaining,
+            )
+            if not ready:
+                continue
+            for pipe in ready:
+                record = streams.get(pipe.fileno())
+                if record is None:
+                    continue
+                _pipe, capture = record
+                chunk = os.read(pipe.fileno(), 8192)
+                if not chunk:
+                    streams.pop(pipe.fileno(), None)
+                    continue
+                allowed = output_limit + 1 - len(capture)
+                if allowed > 0:
+                    capture.extend(chunk[:allowed])
+                if len(capture) > output_limit:
+                    output_too_large = True
+                    process.kill()
+                    streams.clear()
+                    break
+        if process.poll() is None:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                process.kill()
+            else:
+                try:
+                    process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    process.kill()
+        returncode = process.wait()
+    finally:
+        process.stdout.close()
+        process.stderr.close()
+    if timed_out:
+        raise DispatchError("fixed command failed")
+    if output_too_large:
+        _reject("fixed command output too large")
+    return returncode, bytes(stdout), bytes(stderr)
+
+
+def _normalize_remote_path(value: str) -> str:
+    if not value or "\x00" in value:
+        _reject("invalid transfer path")
+    normalized = posixpath.normpath(value)
+    if not normalized.startswith("/"):
+        _reject("invalid transfer path")
+    return normalized
+
+
+def _validate_transfer_option(token: str) -> str:
+    if token == "--sender":
+        _reject("sender mode forbidden")
+    if token in _TRANSFER_FORBIDDEN_LONG_OPTIONS:
+        _reject("forbidden transfer option")
+    if token == _TRANSFER_LOG_FORMAT:
+        return token
+    if token in _TRANSFER_LONG_OPTIONS:
+        return token
+    if token.startswith("--"):
+        _reject("unknown transfer option")
+    if not token.startswith("-") or token == "-":
+        _reject("invalid transfer option")
+    for flag in token[1:]:
+        if flag in {"l", "D", "g", "o"}:
+            _reject("forbidden transfer option")
+        if flag not in _TRANSFER_SHORT_FLAGS:
+            _reject("unknown transfer option")
+    return token
+
+
+def _validated_transfer_argv(install_root: Path, trailing: tuple[str, ...]) -> list[str]:
+    if not trailing or trailing[0] != "--server":
+        _reject("invalid transfer mode")
+    options: list[str] = []
+    index = 1
+    while index < len(trailing) and trailing[index].startswith("-"):
+        options.append(_validate_transfer_option(trailing[index]))
+        index += 1
+    paths = list(trailing[index:])
+    if len(paths) != 2 or paths[0] != ".":
+        _reject("invalid transfer path vector")
+    if _normalize_remote_path(paths[1]) != str(_INSTALL_ROOT / "pack"):
+        _reject("invalid transfer destination")
+    exec_options = list(options)
+    if "--safe-links" not in exec_options:
+        exec_options.append("--safe-links")
+    return ["--server", *exec_options, ".", str(install_root / "pack")]
+
+
+def _write_bounded_log(path: Path, data: bytes, limit: int) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload = data
+    if len(payload) > limit:
+        payload = payload[: limit - len(_LOG_TRUNCATED_SUFFIX)] + _LOG_TRUNCATED_SUFFIX
+    _write_atomic_regular(path, payload, mode=0o600)
+
+
+def _drain_pipe_before_deadline(
+    pipe: Any, capture: bytearray, deadline: float, limit: int
+) -> bool:
+    while True:
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0:
+            return False
+        ready, _unused, _unused2 = select.select([pipe], [], [], remaining)
+        if not ready:
+            continue
+        chunk = os.read(pipe.fileno(), 8192)
+        if not chunk:
+            return True
+        if len(capture) <= limit:
+            capture.extend(chunk[: limit + 1 - len(capture)])
+
+
+def _run_transfer_receiver(arguments: list[str], cwd: Path, log_path: Path) -> None:
+    capture = bytearray()
+    try:
+        process = subprocess.Popen(
+            arguments,
+            stdin=None,
+            stdout=None,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
+            env=_DOCTOR_ENV,
+            shell=False,
+            close_fds=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DispatchError("transfer failed") from exc
+    assert process.stderr is not None
+    deadline = _time.monotonic() + _TRANSFER_TIMEOUT_SECONDS
+    timed_out = False
+    returncode: int | None = None
+    try:
+        while True:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                process.kill()
+                break
+            if process.poll() is not None:
+                break
+            ready, _unused, _unused2 = select.select([process.stderr], [], [], remaining)
+            if not ready:
+                continue
+            chunk = os.read(process.stderr.fileno(), 8192)
+            if not chunk:
+                break
+            if len(capture) <= _TRANSFER_LOG_LIMIT:
+                capture.extend(chunk[: _TRANSFER_LOG_LIMIT + 1 - len(capture)])
+        if process.poll() is None:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                process.kill()
+            else:
+                try:
+                    process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    process.kill()
+        if not _drain_pipe_before_deadline(
+            process.stderr, capture, deadline, _TRANSFER_LOG_LIMIT
+        ):
+            timed_out = True
+    finally:
+        returncode = process.wait()
+        _write_bounded_log(log_path, bytes(capture), _TRANSFER_LOG_LIMIT)
+    if timed_out:
+        raise DispatchError("transfer timed out")
+    if returncode != 0:
+        _reject("transfer rejected")
+
+
+def _rsync_backport_exception_allows(
+    path: Path, detected_version: tuple[int, int, int]
+) -> bool:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    try:
+        metadata = os.fstat(fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != _RSYNC_RECEIVER_BACKPORT_OWNER_UID
+            or stat.S_IMODE(metadata.st_mode) != 0o644
+        ):
+            return False
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _RSYNC_VERSION_OUTPUT_LIMIT:
+                return False
+            chunks.append(chunk)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    try:
+        value = _decode_json(b"".join(chunks))
+    except DispatchError:
+        return False
+    if not isinstance(value, dict) or set(value) != {
+        "version",
+        "reviewed_at",
+        "reviewed_by",
+        "reviewed_fixes",
+        "notes",
+    }:
+        return False
+    if value["version"] != ".".join(str(part) for part in detected_version):
+        return False
+    if not _valid_timestamp(value["reviewed_at"]):
+        return False
+    if not isinstance(value["reviewed_by"], str) or not value["reviewed_by"].strip():
+        return False
+    fixes = value["reviewed_fixes"]
+    if not isinstance(fixes, list) or {
+        item for item in fixes if isinstance(item, str)
+    } != _RSYNC_RECEIVER_BACKPORT_FIXES:
+        return False
+    if len(fixes) != len(_RSYNC_RECEIVER_BACKPORT_FIXES):
+        return False
+    if not isinstance(value["notes"], str) or not value["notes"].strip():
+        return False
+    return True
+
+
+def _assert_rsync_receiver_version(rsync_path: Path, exception_path: Path) -> None:
+    returncode, stdout, _stderr = _run_fixed_captured(
+        [str(rsync_path), "--version"],
+        timeout=_RSYNC_VERSION_TIMEOUT_SECONDS,
+        output_limit=_RSYNC_VERSION_OUTPUT_LIMIT,
+    )
+    if returncode != 0:
+        _reject("rsync receiver unavailable")
+    match = _RSYNC_VERSION_RE.search(stdout)
+    if match is None:
+        _reject("rsync receiver version invalid")
+    version = tuple(int(part.decode("ascii")) for part in match.groups())
+    if version >= _RSYNC_VERSION_FLOOR:
+        return
+    if _rsync_backport_exception_allows(exception_path, version):
+        return
+    _reject("rsync receiver version too old")
+
+
+def _receive_pack(
+    install_root: Path,
+    rsync_path: Path,
+    trailing: tuple[str, ...],
+    log_path: Path,
+    exception_path: Path,
+) -> bytes:
+    _require_regular_shape(rsync_path, executable=True)
+    _require_directory(install_root / "pack")
+    _assert_rsync_receiver_version(rsync_path, exception_path)
+    arguments = [str(rsync_path), *_validated_transfer_argv(install_root, trailing)]
+    _run_transfer_receiver(arguments, install_root, log_path)
+    # Traversal writes land outside pack/ and are therefore not visible here.
+    _validate_pack_tree(install_root / "pack")
+    if _tree_size(install_root / "pack") > _TRANSFER_CAP_BYTES:
+        _reject("transfer exceeds capacity")
+    return b""
+
+
+def _version_tuple(value: Any) -> tuple[str, str]:
+    if not _valid_semver(value):
+        _reject("invalid engine version")
+    match = _SEMVER.fullmatch(value)
+    assert match is not None
+    return match.group(1), match.group(2)
+
+
+def _check_version_gate(candidate: Path, package_path: Path, adapter_path: Path) -> None:
+    package = _decode_json(_read_regular(package_path))
+    if not isinstance(package, dict) or not _valid_semver(package.get("version")):
+        _reject("invalid cli package version")
+    manifest = _validate_manifest(
+        _decode_json(_read_regular(candidate / "build/manifest.json"))
+    )
+    matches = _ADAPTER_VERSION.findall(_read_regular(adapter_path))
+    if len(matches) != 1:
+        _reject("invalid adapter version source")
+    try:
+        adapter_version = matches[0].decode("ascii", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise DispatchError("invalid adapter version") from exc
+    if not (
+        _version_tuple(package["version"])
+        == _version_tuple(manifest["engine_version"])
+        == _version_tuple(adapter_version)
+    ):
+        _reject("engine version mismatch")
+
+
+def _promote_build(
+    install_root: Path,
+    expected_hash: str,
+    node_path: Path,
+    cli_path: Path,
+    package_path: Path,
+    adapter_path: Path,
+) -> bytes:
+    _require_directory(install_root)
+    old_build = install_root / ".luca-build-previous"
+    build_root = install_root / "build"
+    try:
+        old_build_mode = os.lstat(old_build).st_mode
+    except FileNotFoundError:
+        old_build_mode = None
+    except OSError as exc:
+        raise DispatchError("promotion residue unavailable") from exc
+    try:
+        build_mode = os.lstat(build_root).st_mode
+    except FileNotFoundError:
+        build_mode = None
+    except OSError as exc:
+        raise DispatchError("build root unavailable") from exc
+    if old_build_mode is not None:
+        if build_mode is not None:
+            _reject("previous promotion residue exists")
+        if not stat.S_ISDIR(old_build_mode):
+            _reject("previous promotion residue invalid")
+        os.replace(old_build, build_root)
+        build_mode = os.lstat(build_root).st_mode
+        old_build_mode = None
+    if build_mode is None:
+        _reject("missing production build")
+    if not stat.S_ISDIR(build_mode):
+        _reject("production build invalid")
+    try:
+        candidate = Path(tempfile.mkdtemp(prefix=".luca-build-", dir=install_root))
+    except OSError as exc:
+        raise DispatchError("build staging failed") from exc
+    try:
+        _write_new_regular(candidate / "install.yml", _read_regular(install_root / "install.yml"))
+        _copy_regular_tree(install_root / "pack", candidate / "pack")
+        _require_regular_shape(node_path, executable=True)
+        _require_regular_shape(cli_path, executable=False)
+        _run_fixed(
+            [str(node_path), str(cli_path), "build", "--dir", str(candidate)],
+            timeout=_BUILD_TIMEOUT_SECONDS,
+            cwd=candidate,
+        )
+        actual = _hash_install(candidate, node_path, cli_path).decode("ascii").strip()
+        if actual != expected_hash:
+            _reject("staging and production hash differ")
+        _check_version_gate(candidate, package_path, adapter_path)
+        os.replace(build_root, old_build)
+        try:
+            os.replace(candidate / "build", build_root)
+        except BaseException:
+            os.replace(old_build, build_root)
+            raise
+        shutil.rmtree(old_build)
+    except OSError as exc:
+        raise DispatchError("build promotion failed") from exc
+    finally:
+        shutil.rmtree(candidate, ignore_errors=True)
+    return b""
+
+
+def _restart(systemctl_path: Path, install_root: Path) -> bytes:
+    _require_regular_shape(systemctl_path, executable=True)
+    runtime_dir = f"/run/user/{os.getuid()}"
+    environment = dict(_DOCTOR_ENV)
+    environment.update(
+        {
+            "XDG_RUNTIME_DIR": runtime_dir,
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_dir}/bus",
+        }
+    )
+    _run_fixed(
+        [str(systemctl_path), "--user", "restart", *_SYSTEMD_UNITS],
+        timeout=_RESTART_TIMEOUT_SECONDS,
+        cwd=install_root,
+        environment=environment,
+    )
+    return b""
+
+
+def _accept_config(path: Path) -> tuple[str, int]:
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError as exc:
+        raise DispatchError("accept config unavailable") from exc
+    if not stat.S_ISREG(mode) or mode & 0o077:
+        _reject("accept config permissions invalid")
+    try:
+        text = _read_regular(path).decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise DispatchError("accept config invalid") from exc
+    values: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            _reject("accept config syntax invalid")
+        key, value = line.split("=", 1)
+        if key in {"API_SERVER_KEY", "API_SERVER_PORT"}:
+            if key in values:
+                _reject("duplicate accept config key")
+            values[key] = value
+    token = values.get("API_SERVER_KEY")
+    port_text = values.get("API_SERVER_PORT")
+    if token is None or _TOKEN.fullmatch(token) is None:
+        _reject("accept token invalid")
+    if port_text is None or _PORT.fullmatch(port_text) is None:
+        _reject("accept port invalid")
+    port = int(port_text)
+    if not 1 <= port <= 65535:
+        _reject("accept port invalid")
+    return token, port
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, new_url):
+        return None
+
+    def http_error_301(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+
+    http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
+
+
+def _send_accept_turn(token: str, port: int, conversation: str, utterance: str) -> str:
+    body = json.dumps(
+        {"input": utterance, "conversation": conversation}, separators=(",", ":")
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/responses",
+        data=body,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+        with opener.open(request, timeout=_ACCEPT_TIMEOUT_SECONDS) as response:
+            session_values = response.headers.get_all("X-Hermes-Session-Id") or []
+            if len(response.read(_DOCTOR_OUTPUT_LIMIT + 1)) > _DOCTOR_OUTPUT_LIMIT:
+                _reject("accept response too large")
+    except (OSError, urllib.error.URLError, ValueError) as exc:
+        raise DispatchError("accept request failed") from exc
+    if len(session_values) != 1 or _UUID.fullmatch(session_values[0]) is None:
+        _reject("accept session invalid")
+    return session_values[0]
+
+
+def _status(path: Path) -> dict[str, Any]:
+    value = _decode_json(_read_regular(path))
+    if not isinstance(value, dict):
+        _reject("status invalid")
+    mode = value.get("mode")
+    block_bytes = value.get("block_bytes")
+    block_sha256 = value.get("block_sha256")
+    if not isinstance(mode, str) or _MODE_ID.fullmatch(mode) is None:
+        _reject("status mode invalid")
+    if not _valid_nonnegative_integer(block_bytes):
+        _reject("status bytes invalid")
+    if not isinstance(block_sha256, str) or _SHA256.fullmatch(block_sha256) is None:
+        _reject("status hash invalid")
+    return value
+
+
+def _expected_mode(manifest_path: Path, mode: str) -> tuple[int, str]:
+    if mode == "public":
+        return 0, hashlib.sha256(b"").hexdigest()
+    manifest = _validate_manifest(_decode_json(_read_regular(manifest_path)))
+    metadata = manifest["modes"].get(mode)
+    if not isinstance(metadata, dict):
+        _reject("mode absent from manifest")
+    return metadata["bytes"], metadata["sha256"]
+
+
+def _assert_mode(status_path: Path, manifest_path: Path, mode: str) -> None:
+    value = _status(status_path)
+    expected_bytes, expected_hash = _expected_mode(manifest_path, mode)
+    if (
+        value["mode"] != mode
+        or value["block_bytes"] != expected_bytes
+        or value["block_sha256"] != expected_hash
+    ):
+        _reject("accept mode mismatch")
+
+
+def _render_file_set(pack_root: Path) -> set[str]:
+    render_root = pack_root / _RENDER_ROOT
+    try:
+        os.lstat(render_root)
+    except FileNotFoundError:
+        return set()
+    except OSError as exc:
+        raise DispatchError("render root unavailable") from exc
+    files, _directories = _discover_regular_files(render_root)
+    return set(files)
+
+
+def _assert_deletion_subset(install_root: Path, backups_root: Path) -> None:
+    previous = _render_file_set(_latest_backup(backups_root) / "pack")
+    current = _render_file_set(install_root / "pack")
+    if not current.issubset(previous):
+        _reject("render file set increased")
+
+
+def _accept(install_root: Path, config_path: Path, backups_root: Path, kind: str) -> bytes:
+    if kind == "deletion":
+        _assert_deletion_subset(install_root, backups_root)
+    token, port = _accept_config(config_path)
+    status_path = install_root / "state/status.json"
+    manifest_path = install_root / "build/manifest.json"
+    pre_mode = _status(status_path)["mode"]
+    conversation = f"persona-deploy-verify-{uuid.uuid4()}"
+    sessions: list[str] = []
+    primary_error: BaseException | None = None
+    mode_changed = False
+    restore_attempt_failed = False
+    sessions.append(_send_accept_turn(token, port, conversation, "deployment warm-up"))
+    try:
+        mode_changed = True
+        sessions.append(_send_accept_turn(token, port, conversation, f"/persona {_VERIFY_MODE}"))
+        _assert_mode(status_path, manifest_path, _VERIFY_MODE)
+    except BaseException as exc:
+        primary_error = exc
+    restore_error: BaseException | None = None
+    if mode_changed:
+        for _attempt in range(_ACCEPT_RESTORE_RETRIES):
+            try:
+                sessions.append(_send_accept_turn(token, port, conversation, f"/persona {pre_mode}"))
+                _assert_mode(status_path, manifest_path, pre_mode)
+                restore_error = None
+                break
+            except BaseException as exc:
+                restore_attempt_failed = True
+                restore_error = exc
+        if restore_error is not None and primary_error is None:
+            primary_error = restore_error
+    if primary_error is not None:
+        if mode_changed and restore_error is not None:
+            raise DispatchError("acceptance failed with runtime mode unknown") from restore_error
+        raise DispatchError("acceptance failed") from primary_error
+    if restore_attempt_failed:
+        raise DispatchError("acceptance failed")
+    return (json.dumps(sorted(set(sessions)), separators=(",", ":")) + "\n").encode("ascii")
+
+
+def main() -> int:
+    try:
+        command, arguments = _parse_request()
+        root = _test_root()
+        if command == "read-owners":
+            output = _read_owners(_fixed_path(_OWNERS_PATH, root))
+        elif command == "read-sessions":
+            output = _read_sessions(_fixed_path(_DATABASE_PATH, root), arguments[0], arguments[1])
+        elif command == "hash":
+            output = _hash_install(
+                _fixed_path(_INSTALL_ROOT, root),
+                _fixed_path(_NODE_PATH, root),
+                _fixed_path(_PERSONA_CLI_PATH, root),
+            )
+        elif command == "deploy":
+            install_root = _fixed_path(_INSTALL_ROOT, root)
+            phase = arguments[0]
+            if phase == "backup":
+                output = _create_backup(
+                    install_root,
+                    _fixed_path(_BACKUPS_ROOT, root),
+                    _fixed_path(_NODE_PATH, root),
+                    _fixed_path(_PERSONA_CLI_PATH, root),
+                )
+            elif phase == "transfer":
+                output = _receive_pack(
+                    install_root,
+                    _fixed_path(_RSYNC_PATH, root),
+                    arguments[1:],
+                    _fixed_path(_RSYNC_LOG_PATH, root),
+                    _fixed_path(_RSYNC_RECEIVER_BACKPORT_PATH, root),
+                )
+            elif phase == "promote":
+                output = _promote_build(
+                    install_root,
+                    arguments[1],
+                    _fixed_path(_NODE_PATH, root),
+                    _fixed_path(_PERSONA_CLI_PATH, root),
+                    _fixed_path(_PERSONA_PACKAGE_PATH, root),
+                    _fixed_path(_ADAPTER_VERSION_PATH, root),
+                )
+            elif phase == "restart":
+                output = _restart(
+                    _fixed_path(_SYSTEMCTL_PATH, root),
+                    install_root,
+                )
+            else:
+                _reject("unreachable deploy phase")
+        elif command == "restore":
+            output = _restore_backup(
+                _fixed_path(_INSTALL_ROOT, root),
+                _fixed_path(_BACKUPS_ROOT, root),
+                _fixed_path(_NODE_PATH, root),
+                _fixed_path(_PERSONA_CLI_PATH, root),
+            )
+        elif command == "accept":
+            output = _accept(
+                _fixed_path(_INSTALL_ROOT, root),
+                _fixed_path(_ACCEPT_CONFIG_PATH, root),
+                _fixed_path(_BACKUPS_ROOT, root),
+                arguments[0],
+            )
+        else:  # The parser above makes this unreachable; retain the closed-set invariant.
+            _reject("unreachable command")
+        sys.stdout.buffer.write(output)
+        sys.stdout.buffer.flush()
+        return 0
+    except BaseException:
+        # One constant line avoids reflecting commands, paths, database errors,
+        # channel metadata, or conversation text into SSH logs.
+        try:
+            sys.stderr.write(_ERROR_LINE)
+            sys.stderr.flush()
+        except OSError:
+            pass
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

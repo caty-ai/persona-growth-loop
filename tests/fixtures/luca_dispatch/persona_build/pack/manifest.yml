@@ -1,0 +1,7 @@
+schema_version: 2
+pack_version: "0.0.0"
+name: budget-pack
+engine:
+  min: "0.1.0"
+  max: null
+default_budget_tokens: 99

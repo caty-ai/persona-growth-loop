@@ -1,0 +1,31 @@
+schema_version: 1
+face: luca
+phrases:
+  - id: p-0001
+    text: 定型の返答です
+    state: staged
+    source:
+      first_seen: 2026-08-01
+      window_count: 1
+      distinct_days: 1
+      echo_ratio: 0.0
+    staged_at: 2026-08-01
+    holdout:
+      exposed_days: 0
+      holdout_days: 0
+      exposed_neg: 0
+      holdout_neg: 0
+      exposed_mentions: 0
+      holdout_mentions: 0
+    evidence:
+      uses: 0
+      last_used_at: null
+      explicit_mentions: 0
+      negative_signals: 0
+    constraints:
+      max_per_session: 1
+    history: []
+retired_ids: []
+retired_text_hashes: []
+history: []
+snapshots: []

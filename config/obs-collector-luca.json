@@ -1,0 +1,39 @@
+{
+  "face": "luca",
+  "host": "vps-hermes",
+  "speaker": "owner",
+  "obs_root": "~/.persona-growth-loop",
+  "source": {
+    "ssh_host": "example-vps",
+    "kind": "hermes-state-db",
+    "db_path": "~/.hermes/profiles/luca/state.db",
+    "owner_uids": {
+      "telegram": [
+        "100000001"
+      ],
+      "slack": [
+        "U0EXAMPLE01"
+      ]
+    },
+    "expected_dm_entries": {
+      "telegram": [
+        "100000001"
+      ],
+      "slack": [
+        "D0EXAMPLE01"
+      ]
+    },
+    "sources": [
+      "telegram",
+      "slack",
+      "api_server"
+    ],
+    "dm_only": true,
+    "exclude_session_prefixes": [
+      "pgl-verify-"
+    ],
+    "exclude_session_ledger": "~/.persona-growth-loop/state/luca-verify-sessions.jsonl",
+    "voice_enabled": true
+  },
+  "denylist_path": "obs-denylist.txt"
+}

@@ -1,0 +1,2 @@
+{"type":"user","message":{"content":[{"type":"text","text":"DENYLIST_MUST_NOT_APPEAR"}]},"timestamp":"2026-08-02T12:00:00.000Z","sessionId":"00000000-0000-4000-8000-000000000003","cwd":"/workspace/private-notes","isSidechain":false}
+{"type":"user","message":{"content":[{"type":"text","text":"DENYLIST_LATER_LINE_MUST_NOT_BE_SCANNED"}]},"timestamp":"2026-08-02T12:01:00.000Z","sessionId":"00000000-0000-4000-8000-000000000003","cwd":"/workspace/private-notes","isSidechain":false}

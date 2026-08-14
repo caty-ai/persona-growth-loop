@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+# Growth baseline CLI; the drift-mirror baseline shim lives in bin/pgl-mirror-baseline.
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from growthlane.operations import baseline_main
+raise SystemExit(baseline_main())

@@ -1,0 +1,25 @@
+{
+  "schema_version": 2,
+  "pack_name": "budget-pack",
+  "pack_version": "0.0.0",
+  "engine_version": "0.1.0",
+  "engine_range": {
+    "min": "0.1.0",
+    "max": null
+  },
+  "built_at": "2026-08-07T15:20:50.291Z",
+  "content_hash": "f4b8f4e1fd49272afa1bdcef41d97521ed15d650b0215068f90c33cb966cebbd",
+  "counter": "pe-count-v1",
+  "modes": {
+    "dummy": {
+      "bytes": 90,
+      "tokens": 30,
+      "sha256": "8eec6d62d26ea6f1a26cf6d145e80fb51875df690ccf863dde0494974d809e22"
+    },
+    "mode-b": {
+      "bytes": 92,
+      "tokens": 31,
+      "sha256": "948f604f2e46aa0d8f84fff0cfa4120e5886a5d3c4e4862d50699b8f1a6a2a07"
+    }
+  }
+}

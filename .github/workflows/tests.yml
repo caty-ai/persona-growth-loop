@@ -1,0 +1,34 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python3 -m pip install -r requirements.txt
+      - name: Run test suite
+        run: python3 -m unittest discover -s tests -v
+
+  # Same suite on macOS (family-dev-handbook#54). Private staging repo: macOS
+  # bills at 10x, so main pushes only. The bare `push:` trigger above fires on
+  # every branch, hence the ref guard as well as the event guard.
+  unittest-macos:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python3 -m pip install -r requirements.txt
+      - name: Run test suite
+        run: python3 -m unittest discover -s tests -v

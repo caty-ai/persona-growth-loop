@@ -1,0 +1,10 @@
+.DS_Store
+.omc/
+.omx/
+__pycache__/
+*.pyc
+_scratch/
+*.log
+node_modules/
+.readme-work/
+config/obs-denylist.txt

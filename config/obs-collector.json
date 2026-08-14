@@ -1,0 +1,8 @@
+{
+  "face": "alpha",
+  "host": "mbp",
+  "speaker": "owner",
+  "obs_root": "~/.persona-growth-loop",
+  "transcripts_root": "~/.claude/projects",
+  "denylist_path": "obs-denylist.txt"
+}

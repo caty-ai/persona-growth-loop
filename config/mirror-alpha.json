@@ -1,0 +1,5 @@
+{
+  "responder_argv": ["python3", "adapters/probe_responder.py"],
+  "scorer_argv": ["python3", "adapters/probe_scorer.py"],
+  "vault_dir": ""
+}

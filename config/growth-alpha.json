@@ -1,0 +1,8 @@
+{
+  "display_name": "オーナー",
+  "speaker": "owner",
+  "transcripts_root": "~/.claude/projects",
+  "writer_argv": [],
+  "reviewer_argv": [],
+  "classifier_argv": ["python3", "adapters/signal_classifier.py"]
+}

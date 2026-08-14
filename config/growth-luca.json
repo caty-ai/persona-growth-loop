@@ -1,0 +1,10 @@
+{
+  "display_name": "オーナー",
+  "speaker": "owner",
+  "transcripts_root": "",
+  "overlay_home_root": "~/.persona-growth-loop/faces/luca-repo",
+  "staging_root": "~/.persona-growth-loop/faces/luca-staging",
+  "writer_argv": [],
+  "reviewer_argv": [],
+  "classifier_argv": ["python3", "adapters/signal_classifier.py"]
+}

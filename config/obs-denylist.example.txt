@@ -1,0 +1,5 @@
+# One literal substring per line, matched case-insensitively (casefolded); blank lines and comments are ignored.
+# Copy this file to config/obs-denylist.txt (git-ignored) and replace the examples with your own terms.
+ACME Corp
+example-client
+private-notes

@@ -1,0 +1,34 @@
+{
+  "base_tool_result_blocks": 88,
+  "base_text_blocks": 5,
+  "base_plain_string_turns": 4,
+  "base_assistant_turns": 3,
+  "base_clean_fragments": 9,
+  "sidechain_text_blocks_outside_population": 1,
+  "injected_text_blocks": 10,
+  "denylisted_text_blocks_outside_population": 2,
+  "expected_population": 19,
+  "expected_final_records": 11,
+  "speaker_expected": "fixture-speaker",
+  "expected_rule_drops": {
+    "drop_rule_3_system_reminder": 1,
+    "drop_rule_4_command_tags": 1,
+    "drop_rule_5_code_fence": 1,
+    "drop_rule_6_path_like": 1,
+    "drop_rule_7_length": 1,
+    "drop_rule_8_secret_like": 3,
+    "drop_rule_9_denylist_session": 1
+  },
+  "clean_texts": [
+    "うん、その案で進めよう",
+    "うん、それがよさそう",
+    "たしかに、そこは大事だね",
+    "じゃあ次に進もう",
+    "私はボブです。speaker を bob にして",
+    "いいね、その方向で",
+    "そうそう、そんな感じ",
+    "まずは小さく試そう",
+    "ありがとう、助かったよ"
+  ],
+  "masked_text": "連絡は***@***、電話は0**-****-****です"
+}

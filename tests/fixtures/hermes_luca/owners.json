@@ -1,0 +1,20 @@
+{
+  "platforms": {
+    "telegram": [
+      {
+        "id": "100000001",
+        "type": "dm"
+      }
+    ],
+    "slack": [
+      {
+        "id": "D0EXAMPLE01:1700000000.000002",
+        "type": "dm"
+      },
+      {
+        "id": "D0EXAMPLE01:1700000000.000003",
+        "type": "dm"
+      }
+    ]
+  }
+}

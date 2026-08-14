@@ -1,0 +1,8 @@
+window: 30
+min_count: 8
+min_days: 5
+staged_min_days: 14
+min_uses: 3
+decay_days: 90
+echo_ratio: 0.5
+
