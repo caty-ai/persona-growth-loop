@@ -16,10 +16,11 @@ from unittest import mock
 
 import mirror.weekly as weekly_module
 from collectors.hermes_luca.collector import collect as luca_collect, jst_epoch_window
+from growthlane.faces import get_profile
 from growthlane.ledger import dump_ledger, empty_ledger
 from growthlane.locking import staging_lock_path
 from growthlane.notify import Digest
-from mirror.common import MirrorError, load_configs
+from mirror.common import MirrorError, injected_bytes, load_configs
 from mirror.staging import StagingBuild, regenerate_staging
 from mirror.weekly import fetch_luca_production_digest, luca_parity, run_weekly
 from test_mirror_support import MirrorHarness
@@ -207,6 +208,55 @@ class LucaStagingTests(LucaFixture):
         )
         with self.assertRaisesRegex(MirrorError, "placeholder declarations"):
             regenerate_staging(self.config, command_runner=self.runner())
+
+
+class InjectedBytesTests(LucaFixture):
+    def test_luca_reads_staging_build_instead_of_distinct_overlay_build(self) -> None:
+        overlay_build = self.clone / "build"
+        overlay_build.mkdir()
+        (overlay_build / "artifact.bin").write_bytes(b"overlay-home bytes\x00")
+        staging_build = self.staging / "build"
+        staging_build.mkdir(parents=True)
+        (staging_build / "artifact.bin").write_bytes(b"staging bytes\x00\xff")
+
+        files, warning = injected_bytes(get_profile("luca"), self.home, self.config)
+
+        self.assertIsNone(warning)
+        self.assertEqual(files, {"artifact.bin": b"staging bytes\x00\xff"})
+
+    def test_luca_missing_staging_build_warns_with_staging_path(self) -> None:
+        overlay_build = self.clone / "build"
+        overlay_build.mkdir()
+        (overlay_build / "artifact.bin").write_bytes(b"must not be used")
+
+        files, warning = injected_bytes(get_profile("luca"), self.home, self.config)
+
+        self.assertEqual(files, {})
+        self.assertEqual(
+            warning,
+            f"build directory absent or unsafe: {self.staging / 'build'}",
+        )
+
+    def test_luca_missing_staging_root_fails_closed_with_warning(self) -> None:
+        files, warning = injected_bytes(
+            get_profile("luca"),
+            self.home,
+            {**self.config, "staging_root": None},
+        )
+
+        self.assertEqual(files, {})
+        self.assertIn("staging root absent or unsafe", warning or "")
+
+    def test_alpha_combined_bytes_remain_byte_for_byte_unchanged(self) -> None:
+        alpha_home = self.home / "faces" / "alpha"
+        alpha_home.mkdir(parents=True)
+        expected = b"alpha combined bytes\x00\xff\n"
+        (alpha_home / "overlay.md").write_bytes(expected)
+
+        files, warning = injected_bytes(get_profile("alpha"), self.home, {})
+
+        self.assertIsNone(warning)
+        self.assertEqual(files, {"overlay.md": expected})
 
 
 class LucaParityTests(LucaFixture):
