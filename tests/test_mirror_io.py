@@ -537,17 +537,22 @@ class MirrorIOTests(unittest.TestCase):
             root = Path(temporary).resolve()
             overlay_home = root / "luca"
             overlay_home.mkdir()
+            staging_root = root / "luca-staging"
+            staging_root.mkdir()
 
             files, warning = injected_bytes(
                 get_profile("luca"),
                 root / "pgl-home",
-                {"overlay_home_root": str(overlay_home)},
+                {
+                    "overlay_home_root": str(overlay_home),
+                    "staging_root": str(staging_root),
+                },
             )
 
             self.assertEqual(files, {})
             self.assertIsNotNone(warning)
             self.assertIn("build directory absent or unsafe", warning)
-            self.assertIn(str(overlay_home / "build"), warning)
+            self.assertIn(str(staging_root / "build"), warning)
 
     def test_atomic_write_secures_new_directories_and_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

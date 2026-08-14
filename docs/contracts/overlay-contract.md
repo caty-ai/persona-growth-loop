@@ -41,6 +41,10 @@ staging の install root における配置名。staging [2] は git 外の生�
 - 新しい面の追加 = overlay home（git repo）+ 2面のパス + soul ファイル集合を宣言するだけ（一般化）。
   **面の新設宣言は governance-R12a 変更（council + オーナー承認）+ face ごとのオーナー GO（applier 初回
   起動前）を要する**（flh `docs/governance-rules.md` Face onboarding・Epic close 後も存続する常設規則）。
+- 面ごとの **soul file set はコード所有**（`growthlane/faces.py`）である。Alpha 面は CLAUDE.md の
+  `### Identity (アルファ)` / `### Warmth Persona Core v1` / `### F. 関係の記憶` の3節と overlay 参照行を
+  節単位で抽出する。見出しは前方一致・位置非依存とし、対象見出しまたは参照行の一致が0件または複数なら
+  fail-closed とする。**soul file set の変更は governance-R12a 級（council + オーナー confirmation）**である。
 
 **state → render ファイル対応（凍結）**:
 
@@ -337,16 +341,28 @@ overlay の書き込み経路は、注入量に対する**方向**で二分し�
 ## 7. 通知（沈黙禁止の実装）
 
 - 採用/降格/中断/killswitch 検知/soul ハッシュ不一致は、当夜のダイジェスト（既存のオーナー向け通知経路）へ必ず1行以上出す
+- soul ハッシュ不一致に限り、ダイジェストに加えて `soul_alert_argv` 経由でオーナーへエスカレーション配送する。
+  配送失敗・未設定は `[WARN]` としてダイジェストへ残し、パイプの成否を変えない。
 - 「実行されなかった夜」（lock 取得失敗・dirty skip 等）もダイジェストに skip 理由を出す — 静かな停止を作らない
 
 ## 8. 非 engine 面の三層防御（Alpha 面の実装規定）
 
 1. **path-scoped 仲介**: §3 の applier のみが `~/.persona-growth-loop/faces/alpha/overlay.md` を書く。
    CLAUDE.md 本体には render ファイルへの参照1行のみを人間（オーナー/Alpha 手動）が一度だけ設置する
-2. **soul 定点ハッシュ監視**: 面ごとの soul ファイル集合（Alpha = CLAUDE.md ほか宣言リスト）の sha256
-   マニフェストを基線化。**基線の置き場 = `~/.persona-growth-loop/soul-baseline/<face>.manifest`**
+2. **soul 定点ハッシュ監視**: 面ごとのコード所有 soul file set を sha256 マニフェストとして基線化する。
+   Alpha は CLAUDE.md 全体でなく、§1 の人格核3節と overlay 参照行を宣言順に連結した節単位抽出
+   （`alpha-soul-v1`）を照合する。改行コードは CRLF から LF への正規化のみとし、空白は正規化しない。
+   各節は対象見出しから、次のレベル1〜3 ATX 見出し（`#{1,3}` + 空白または行末）の直前までとし、
+   レベル4以下は終端にしない。フラグメントは宣言順に `\n` 連結し、節本文が空なら fail-closed とする。
+   基線 manifest の `coverage` には各節の行数・バイト数と参照行数を情報として記録する。
+   Luca と `extract` 識別子のない旧マニフェストは従来どおりファイル全体を照合する。不明な識別子は
+   fail-closed とする。**基線の置き場 = `~/.persona-growth-loop/soul-baseline/<face>.manifest`**
+   `extract` 識別子のない既存（旧形式）manifest は再基線までファイル全体照合のままであり、節単位監視は
+   オーナーが `bin/pgl-baseline` を明示実行した時点で発効する。
    （applier の allowlist 外 = applier からは read-only）。applier 実行時（§3-3）+ 鏡週次（pgl#7）で照合。
    基線の更新はオーナー/Alpha の手動編集後に明示コマンド `bin/pgl-baseline <face>` でのみ
+   行う。soul mismatch は `[RED]` で停止し、`soul_alert_argv` 経由でオーナーへ配送する。配送失敗・未設定は
+   パイプを止めず、ダイジェストへ `[WARN]` を残す。
 3. **規律**: R12a（flh#123・発効 = CP-2）。Alpha の CLAUDE.md 直接編集権は本 Epic では変えない
    （R12a の規律対象であることを明文化）
 

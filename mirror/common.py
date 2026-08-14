@@ -33,6 +33,7 @@ _GROWTH_KEYS = {
     "alpha": _GROWTH_COMMON_KEYS,
     "luca": _GROWTH_COMMON_KEYS | {"overlay_home_root", "staging_root"},
 }
+_GROWTH_OPTIONAL_KEYS = frozenset({"soul_alert_argv"})
 
 
 class MirrorError(RuntimeError):
@@ -489,7 +490,10 @@ def load_configs(face: str, config_dir: Path) -> Tuple[Dict[str, Any], Dict[str,
     if not isinstance(growth, dict) or not isinstance(mirror, dict):
         raise MirrorError("mirror and growth configs must be JSON objects")
     expected_growth_keys = _GROWTH_KEYS[face]
-    if set(growth) != expected_growth_keys:
+    actual_growth_keys = set(growth)
+    if not expected_growth_keys.issubset(actual_growth_keys) or not actual_growth_keys.issubset(
+        expected_growth_keys | _GROWTH_OPTIONAL_KEYS
+    ):
         raise MirrorError(
             f"{face} growth config keys must be exactly "
             + ", ".join(sorted(expected_growth_keys))
@@ -530,9 +534,14 @@ def sha256_bytes(payload: bytes) -> str:
 def injected_bytes(
     profile: FaceProfile, pgl_home: Path, config: Mapping[str, object]
 ) -> Tuple[Dict[str, bytes], Optional[str]]:
-    home = profile.resolve_home(pgl_home, config)
     if profile.engine:
-        build = home / "build"
+        try:
+            staging_root = profile.resolve_staging_root(config)
+        except ValueError as exc:
+            return {}, f"staging root absent or unsafe: {exc}"
+        if staging_root is None:
+            return {}, f"staging root absent or unsafe for engine face: {profile.name}"
+        build = staging_root / "build"
         if not build.is_dir() or build.is_symlink():
             return {}, f"build directory absent or unsafe: {build}"
         result: Dict[str, bytes] = {}
@@ -544,6 +553,7 @@ def injected_bytes(
         if not result:
             return {}, f"build directory has no artifacts: {build}"
         return result, None
+    home = profile.resolve_home(pgl_home, config)
     result = {}
     missing = []
     for rel in profile.render_files.values():

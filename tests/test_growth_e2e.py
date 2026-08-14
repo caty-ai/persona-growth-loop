@@ -60,6 +60,8 @@ class GrowthE2ETests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
+        self.home_patch = mock.patch.dict(os.environ, {"HOME": str(self.root)})
+        self.home_patch.start()
         self.home = self.root / "pgl-home"
         self.overlay = self.home / "faces" / "alpha"
         self.overlay.mkdir(parents=True)
@@ -85,8 +87,15 @@ class GrowthE2ETests(unittest.TestCase):
         run("git", "config", "user.email", "pgl-test@example.invalid", cwd=self.overlay)
         run("git", "add", "overlay-ledger.yml", "overlay.md", "blocklist.txt", cwd=self.overlay)
         run("git", "commit", "-qm", "bootstrap fixtures", cwd=self.overlay)
-        self.soul = Path.home() / ".claude" / "settings.json"
-        self.assertTrue(self.soul.is_file())
+        self.soul = self.root / ".claude" / "CLAUDE.md"
+        self.soul.parent.mkdir()
+        self.soul.write_text(
+            "### Identity (アルファ)\nidentity\n"
+            "### Warmth Persona Core v1\nwarmth\n"
+            "### F. 関係の記憶\nmemory\n"
+            "~/.persona-growth-loop/faces/alpha/overlay.md\n",
+            encoding="utf-8",
+        )
         write_manifest(get_profile("alpha"), self.home, self.config, [self.soul])
         (self.home / "reports" / "weekly").mkdir(parents=True)
         (self.home / "obslog" / "alpha").mkdir(parents=True)
@@ -107,6 +116,7 @@ class GrowthE2ETests(unittest.TestCase):
         }
 
     def tearDown(self) -> None:
+        self.home_patch.stop()
         self.temporary.cleanup()
 
     def mirror(self, day: date) -> None:

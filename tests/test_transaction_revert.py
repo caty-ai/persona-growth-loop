@@ -36,9 +36,20 @@ class TransactionRevertTests(unittest.TestCase):
             soul = overlay / "persona-engine" / "catalogs" / "soul.txt"
             soul.write_text("frozen\n", encoding="utf-8")
         else:
+            home_patch = mock.patch.dict(os.environ, {"HOME": str(root)})
+            home_patch.start()
+            self.addCleanup(home_patch.stop)
             overlay.mkdir(parents=True)
             config = {"display_name": "利用者"}
-            soul = Path.home() / ".claude" / "settings.json"
+            soul = root / ".claude" / "CLAUDE.md"
+            soul.parent.mkdir()
+            soul.write_text(
+                "### Identity (アルファ)\nidentity\n"
+                "### Warmth Persona Core v1\nwarmth\n"
+                "### F. 関係の記憶\nmemory\n"
+                "~/.persona-growth-loop/faces/alpha/overlay.md\n",
+                encoding="utf-8",
+            )
         (overlay / profile.ledger_path).write_bytes(dump_ledger(empty_ledger(face)))
         (overlay / profile.blocklist_path).write_bytes(b"")
         for rel in profile.render_files.values():

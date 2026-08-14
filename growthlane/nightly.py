@@ -15,7 +15,8 @@ from growthlane.config import load_json_object, parse_scalar_yaml
 from growthlane.faces import get_profile
 from growthlane.gates import check_all
 from growthlane.locking import acquire_lock, contention_message, release_lock
-from growthlane.notify import Digest
+from growthlane.notify import Digest, send_soul_alert
+from growthlane.soul import SoulError
 from growthlane.tripwire import inspect
 from growthlane.ucd_runtime import emit_admission_refusal
 from mirror.common import read_json_nofollow
@@ -538,6 +539,8 @@ def main(argv: list[str] | None = None) -> int:
             run_face(profile, pgl_home, configs[face], thresholds, run_date, digest)
         except Exception as exc:
             digest.emit(f"{face}: lane stopped for night: {exc}")
+            if isinstance(exc, SoulError):
+                send_soul_alert(configs[face], face, exc, digest)
             failed = True
         finally:
             if not release_lock(lock):

@@ -29,9 +29,9 @@ from growthlane.locking import (
     release_lock,
     staging_contention_detail,
 )
-from growthlane.notify import Digest
+from growthlane.notify import Digest, send_soul_alert
 from growthlane.render import ADOPTED_TEMPLATE, CANDIDATES_TEMPLATE, render_files
-from growthlane.soul import verify_manifest
+from growthlane.soul import SoulError, verify_manifest
 from growthlane.ucd_runtime import runtime_status
 from harvester.harvest import (
     TranscriptUnavailable,
@@ -127,6 +127,10 @@ def _verify_manifest_or_red(
 ) -> None:
     try:
         verify_manifest(profile, pgl_home, config)
+    except SoulError as exc:
+        digest.emit(f"[RED] {profile.name}: soul/root baseline check failed: {exc}")
+        send_soul_alert(config, profile.name, exc, digest)
+        raise
     except Exception as exc:
         digest.emit(f"[RED] {profile.name}: soul/root baseline check failed: {exc}")
         raise

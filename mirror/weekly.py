@@ -22,7 +22,7 @@ from growthlane.locking import (
     release_lock,
     staging_contention_detail,
 )
-from growthlane.notify import Digest
+from growthlane.notify import Digest, send_soul_alert
 from growthlane.soul import SoulError, verify_manifest
 from growthlane.tripwire import CAPS
 from growthlane.ucd_runtime import runtime_status
@@ -703,6 +703,7 @@ def _weekly_report_context(
         except SoulError as exc:
             soul = "MISMATCH"
             digest.emit(f"[RED] {face}: mirror soul check failed: {exc}")
+            send_soul_alert(growth, face, exc, digest)
     return WeeklyReportContext(ledger_summary, ledger_status, cap_usage, soul)
 
 

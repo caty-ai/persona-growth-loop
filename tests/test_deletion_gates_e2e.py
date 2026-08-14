@@ -38,6 +38,8 @@ class Fixture:
     def __enter__(self) -> Fixture:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
+        self.home_patch = mock.patch.dict(os.environ, {"HOME": str(self.root)})
+        self.home_patch.start()
         self.home = self.root / "pgl-home"
         self.overlay = self.home / "faces" / "alpha"
         self.overlay.mkdir(parents=True)
@@ -67,9 +69,15 @@ class Fixture:
         self.git("config", "user.email", "pgl@example.invalid")
         self.git("add", "--", *self.profile.allowlist)
         self.git("commit", "-qm", "bootstrap")
-        self.soul = Path.home() / ".claude" / "settings.json"
-        if not self.soul.is_file():
-            raise AssertionError("test environment must provide alpha's soul source")
+        self.soul = self.root / ".claude" / "CLAUDE.md"
+        self.soul.parent.mkdir()
+        self.soul.write_text(
+            "### Identity (アルファ)\nidentity\n"
+            "### Warmth Persona Core v1\nwarmth\n"
+            "### F. 関係の記憶\nmemory\n"
+            "~/.persona-growth-loop/faces/alpha/overlay.md\n",
+            encoding="utf-8",
+        )
         write_manifest(self.profile, self.home, self.config, [self.soul])
         self.write_gates()
         self.write_mirror()
@@ -87,6 +95,7 @@ class Fixture:
         return self
 
     def __exit__(self, *_: object) -> None:
+        self.home_patch.stop()
         self.temporary.cleanup()
 
     def git(self, *args: str) -> subprocess.CompletedProcess[str]:
