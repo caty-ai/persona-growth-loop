@@ -820,6 +820,10 @@ raise SystemExit(0 if not issues else 2)
         self.assert_rejected("deploy backup", role="deploy")
 
     @unittest.skipUnless(HAS_REAL_RSYNC, "/usr/bin/rsync unavailable")
+    @unittest.skipUnless(
+        sys.platform == "darwin",
+        "production sender is the macOS orchestrator; Linux client rsync (samba) emits a --server capability token the dispatcher's fixed allowlist intentionally rejects",
+    )
     def test_deploy_transfer_real_rsync_push_lands_under_pack_and_deletes_removed_entries(self):
         self._install_real_server_rsync()
         source = self.root / "transfer-source"

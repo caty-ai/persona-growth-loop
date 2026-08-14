@@ -4,12 +4,12 @@ import base64
 import json
 import os
 import stat
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from adapters import _common, probe_responder, probe_scorer, signal_classifier
+from support import canonical_temporary_directory
 
 
 def block_payload(text: str, *, path: str = "overlay.md") -> dict[str, object]:
@@ -37,7 +37,7 @@ class FakeTransport:
 
 class AdapterTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(dir="/private/tmp")
+        self.temporary = canonical_temporary_directory()
         self.root = Path(self.temporary.name)
         self.home = self.root / "home"
         self.home.mkdir()

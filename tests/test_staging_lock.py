@@ -12,7 +12,6 @@ import json
 import errno
 import os
 import subprocess
-import tempfile
 import unittest
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -29,6 +28,7 @@ from growthlane.locking import (
 )
 from mirror.common import MirrorError
 from mirror.staging import regenerate_staging
+from support import canonical_temporary_directory
 
 
 HASH_A = "a" * 64
@@ -45,7 +45,7 @@ def _completed(
 
 class StagingLockFixture(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(dir="/private/tmp")
+        self.temporary = canonical_temporary_directory()
         self.root = Path(self.temporary.name)
         self.clone = self.root / "luca-repo"
         self.staging = self.root / "luca-staging"

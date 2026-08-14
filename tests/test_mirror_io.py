@@ -191,9 +191,17 @@ class MirrorIOTests(unittest.TestCase):
             )
 
             def replace_with_live_lock(_lock: Path) -> tuple[datetime, int, str]:
+                stale_inode = os.lstat(lock).st_ino
                 owner.unlink()
                 lock.rmdir()
-                lock.mkdir()
+                for index in range(8):
+                    (lock.parent / f"decoy-{index}").mkdir()
+                    lock.mkdir()
+                    if os.lstat(lock).st_ino != stale_inode:
+                        break
+                    lock.rmdir()
+                else:
+                    self.fail("could not obtain a distinct lock inode")
                 owner.write_text(
                     json.dumps(
                         {

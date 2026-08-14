@@ -5,7 +5,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
@@ -13,6 +12,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 from growthlane.ledger import dump_ledger, empty_ledger
 from mirror.common import write_snapshot
+from support import canonical_temporary_directory
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -22,7 +22,7 @@ MIRROR_SCORER = REPO / "tests" / "stubs" / "mirror_scorer.py"
 
 class MirrorHarness(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(dir="/private/tmp")
+        self.temporary = canonical_temporary_directory()
         self.root = Path(self.temporary.name)
         self.fake_home = self.root / "fake-home"
         self.soul_source = self.fake_home / ".claude" / "settings.json"
