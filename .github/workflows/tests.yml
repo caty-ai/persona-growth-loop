@@ -15,6 +15,10 @@ jobs:
           python-version: "3.14"
       - name: Install dependencies
         run: python3 -m pip install -r requirements.txt
+      - name: Provide the developer-home file the alpha-face fixtures expect
+        run: |
+          mkdir -p ~/.claude
+          printf '{}\n' > ~/.claude/settings.json
       - name: Run test suite
         run: python3 -m unittest discover -s tests -v
 
@@ -30,5 +34,9 @@ jobs:
           python-version: "3.14"
       - name: Install dependencies
         run: python3 -m pip install -r requirements.txt
+      - name: Provide the developer-home file the alpha-face fixtures expect
+        run: |
+          mkdir -p ~/.claude
+          printf '{}\n' > ~/.claude/settings.json
       - name: Run test suite
         run: python3 -m unittest discover -s tests -v
