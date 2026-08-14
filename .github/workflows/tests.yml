@@ -15,6 +15,13 @@ jobs:
           python-version: "3.14"
       - name: Install dependencies
         run: python3 -m pip install -r requirements.txt
+      - name: TEMP probe — fake-rsync shebang portability
+        run: |
+          mkdir -p /tmp/probe/pack/catalogs && cd /tmp/probe
+          printf '#!/usr/bin/python3\nimport os\nfrom pathlib import Path\nt = Path(os.getcwd()) / "pack/catalogs/oversized.bin"\nt.parent.mkdir(parents=True, exist_ok=True)\nt.write_bytes(b"x"*32)\n' > fake-rsync
+          chmod 755 fake-rsync
+          ./fake-rsync && ls -la pack/catalogs/ || echo "FAKE-RSYNC-FAILED exit=$?"
+          /usr/bin/python3 --version || echo "NO-USR-BIN-PYTHON3"
       - name: Provide the developer-home file the alpha-face fixtures expect
         run: |
           mkdir -p ~/.claude
