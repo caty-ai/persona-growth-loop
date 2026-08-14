@@ -5,5 +5,5 @@
   "writer_argv": [],
   "reviewer_argv": [],
   "classifier_argv": ["python3", "adapters/signal_classifier.py"],
-  "soul_alert_argv": ["~/.claude/scripts/tg-send"]
+  "soul_alert_argv": []
 }
