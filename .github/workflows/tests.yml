@@ -22,8 +22,9 @@ jobs:
       - name: Run test suite
         run: python3 -m unittest discover -s tests -v
 
-  # Required gate since issue #1: the suite runs portably on Linux
-  # (two real-client-rsync dispatcher tests are macOS-only by design).
+  # Blocking in CI since issue #1: the suite runs portably on Linux.
+  # Linux skips 4 tests by design: two real-client-rsync dispatcher tests
+  # (production sender is macOS) and two launchd template lint tests (plutil).
   unittest-linux:
     runs-on: ubuntu-latest
     steps:

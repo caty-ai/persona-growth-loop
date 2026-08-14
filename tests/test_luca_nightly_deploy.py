@@ -6,8 +6,8 @@ import shlex
 import shutil
 import stat
 import subprocess
-import tempfile
 import sys
+import tempfile
 import unittest
 import uuid
 from datetime import datetime, timezone
@@ -20,6 +20,7 @@ from collectors.hermes_luca import journal
 from collectors.hermes_luca.adapters import Turn
 from growthlane import deploy, nightly
 from tests import test_luca_dispatch as dispatch_tests
+from tests.support import MACOS_RSYNC_CLIENT_SKIP_REASON
 
 
 CONTENT_HASH = "a" * 64
@@ -1094,7 +1095,7 @@ class LucaNightlyDeployTests(unittest.TestCase):
     @unittest.skipUnless(dispatch_tests.HAS_REAL_RSYNC, "/usr/bin/rsync unavailable")
     @unittest.skipUnless(
         sys.platform == "darwin",
-        "production sender is the macOS orchestrator; Linux client rsync (samba) emits a --server capability token the dispatcher's fixed allowlist intentionally rejects",
+        MACOS_RSYNC_CLIENT_SKIP_REASON,
     )
     def test_real_dispatcher_surface_via_fake_ssh_and_real_rsync(self) -> None:
         fixture = dispatch_tests.LucaDispatchTests(

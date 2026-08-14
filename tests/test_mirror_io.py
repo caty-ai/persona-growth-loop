@@ -194,6 +194,9 @@ class MirrorIOTests(unittest.TestCase):
                 stale_inode = os.lstat(lock).st_ino
                 owner.unlink()
                 lock.rmdir()
+                # ext4 may immediately reuse the freed inode, making the recreated directory
+                # indistinguishable to the production identity check. Decoys deterministically
+                # force the identity-mismatch branch; the coincidence gap is tracked in issue #7.
                 for index in range(8):
                     (lock.parent / f"decoy-{index}").mkdir()
                     lock.mkdir()

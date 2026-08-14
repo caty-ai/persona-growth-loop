@@ -2,6 +2,9 @@ import sys
 import tempfile
 
 
+MACOS_RSYNC_CLIENT_SKIP_REASON = "production sender is the macOS orchestrator; Linux client rsync (samba) emits a --server capability token the dispatcher's fixed allowlist intentionally rejects"
+
+
 def canonical_temporary_directory() -> tempfile.TemporaryDirectory:
     """Temp dir whose path is already canonical (raw == resolve()).
 
