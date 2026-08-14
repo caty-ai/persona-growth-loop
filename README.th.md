@@ -9,7 +9,7 @@
 [![tests](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml/badge.svg)](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
-![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
+![platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 
 Persona Growth Loop (PGL) ช่วยให้ AI เอเจนต์ที่ทำงานต่อเนื่องระยะยาว ค่อย ๆ พัฒนาสำเนียงการพูดของตัวเอง<br>
 จากบทสนทนาจริง — ในขณะที่แก่นบุคลิกภาพยังคงถูกแช่แข็งและแตะต้องไม่ได้เสมอ<br>
@@ -99,9 +99,10 @@ flowchart LR
 |---|---|
 | Python 3.11+ (มีดีเพนเดนซีเดียวคือ PyYAML) | ✅ ทดสอบผ่าน CI บน 3.11 พัฒนาบน 3.14 |
 | macOS | ✅ ใช้งานจริงในโปรดักชันทุกวัน |
-| Linux (Ubuntu) | ✅ รันชุดทดสอบทั้งหมดบน CI |
 | ใช้ Claude Code เป็นเอเจนต์ที่ถูกสังเกตการณ์ (local face) | ✅ ใช้งานในโปรดักชันแล้ว |
 | เอนจินบุคลิกภาพระยะไกลผ่าน SSH (engine face) | ✅ การสังเกตการณ์ทำงานในโปรดักชันแล้ว ส่วนการฉีดเข้าระบบยังอยู่หลังเกตอนุมัติ |
+
+> **หมายเหตุ:** ยังไม่ได้ตรวจสอบบน Linux — บางส่วนของชุดทดสอบสมมติโครงสร้างไฟล์ของ macOS ติดตามได้ที่ [issue #1](https://github.com/caty-ai/persona-growth-loop/issues/1) (CI มีงาน Linux แบบไม่บังคับ)
 
 รันไทม์เอเจนต์อื่น ๆ เป็นเป้าหมายการออกแบบในแผนการเปิดใช้งาน แต่ยังไม่ได้เชื่อมต่อจริง — หากสภาพแวดล้อมของคุณแตกต่างจากสอง face ข้างต้น ควรมอง PGL เป็นสถาปัตยกรรมอ้างอิง มากกว่าจะเป็นระบบที่ใช้งานได้ทันที
 

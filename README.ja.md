@@ -9,7 +9,7 @@
 [![tests](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml/badge.svg)](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
-![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
+![platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 
 Persona Growth Loop（PGL）は、毎日使う AI エージェントが実際の会話から<br>
 自分の「話し方」を少しずつ育てていくためのツールです。人格の核には何も触れさせません。<br>
@@ -99,9 +99,10 @@ flowchart LR
 |---|---|
 | Python 3.11+（依存は PyYAML 1つ） | ✅ CI は 3.11・開発は 3.14 |
 | macOS | ✅ 毎日の本番運用 |
-| Linux（Ubuntu） | ✅ CI でフルテスト |
 | 観測対象エージェント = Claude Code（ローカル面） | ✅ 本番稼働中 |
 | SSH 越しのリモート persona エンジン（エンジン面） | ✅ 観測は本番稼働中・注入は承認ゲート待ち |
+
+> **メモ:** Linux は未検証です — テストスイートの一部が macOS のファイルシステム配置を前提にしています。[issue #1](https://github.com/caty-ai/persona-growth-loop/issues/1) で追跡中（CI に参考用の Linux ジョブあり）。
 
 他のエージェントランタイムへの展開は設計済みですが未配線です。上の2面と構成が違う場合は、そのまま導入するより「参照アーキテクチャ」として読むのが現実的です。
 
