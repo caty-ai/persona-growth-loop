@@ -8,7 +8,7 @@
 
 [![tests](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml/badge.svg)](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
+![python](https://img.shields.io/badge/python-3.14%2B-3776AB?logo=python&logoColor=white)
 ![platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 
 Persona Growth Loop (PGL) ช่วยให้ AI เอเจนต์ที่ทำงานต่อเนื่องระยะยาว ค่อย ๆ พัฒนาสำเนียงการพูดของตัวเอง<br>
@@ -97,7 +97,7 @@ flowchart LR
 
 | ข้อกำหนด | สถานะ |
 |---|---|
-| Python 3.11+ (มีดีเพนเดนซีเดียวคือ PyYAML) | ✅ ทดสอบผ่าน CI บน 3.11 พัฒนาบน 3.14 |
+| Python 3.14+ (มีดีเพนเดนซีเดียวคือ PyYAML) | ✅ CI และการพัฒนาใช้ 3.14 |
 | macOS | ✅ ใช้งานจริงในโปรดักชันทุกวัน |
 | ใช้ Claude Code เป็นเอเจนต์ที่ถูกสังเกตการณ์ (local face) | ✅ ใช้งานในโปรดักชันแล้ว |
 | เอนจินบุคลิกภาพระยะไกลผ่าน SSH (engine face) | ✅ การสังเกตการณ์ทำงานในโปรดักชันแล้ว ส่วนการฉีดเข้าระบบยังอยู่หลังเกตอนุมัติ |
