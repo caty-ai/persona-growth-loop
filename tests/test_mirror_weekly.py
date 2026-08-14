@@ -11,7 +11,7 @@ from growthlane.gates import check_mirror
 from growthlane.ledger import empty_ledger, new_phrase
 from growthlane.notify import Digest
 from growthlane.ucd_runtime import UcdRuntimeStatus, runtime_status
-from mirror.common import MirrorError
+from mirror.common import MirrorError, load_configs
 from mirror.weekly import TIER_S_KEYS, _collector_liveness, _write_tier_s, run_weekly
 
 from test_mirror_support import MirrorHarness, day_with_exposure
@@ -219,6 +219,71 @@ class WeeklyMirrorTests(MirrorHarness):
         self.assertIn("symlinked baseline manifest rejected", linked.stdout)
         self.assertIn("Soul check: MISMATCH", self.weekly_report_text(later_day))
         check_mirror(self.home, "alpha", later_day.isoformat())
+
+    def test_weekly_soul_mismatch_invokes_alert_command(self) -> None:
+        run_day = _jst_today() - timedelta(days=1)
+        self.write_soul_manifest()
+        self.write_usage(run_day, [])
+        self.soul_source.write_text('{"fixture":"mutated"}\n', encoding="utf-8")
+        alert_output = self.root / "weekly-alert.txt"
+        alert_script = self.root / "weekly-alert.sh"
+        alert_script.write_text(
+            "#!/bin/sh\ncat >> \"$PGL_ALERT_OUTPUT\"\n", encoding="utf-8"
+        )
+        alert_script.chmod(0o755)
+        growth, mirror, profile = load_configs("alpha", self.config_dir)
+        growth["soul_alert_argv"] = [str(alert_script)]
+        digest = Digest(self.home, run_day.isoformat())
+        with (
+            mock.patch(
+                "mirror.weekly.load_configs", return_value=(growth, mirror, profile)
+            ),
+            mock.patch.dict(
+                os.environ,
+                {**self.env, "PGL_ALERT_OUTPUT": str(alert_output)},
+                clear=False,
+            ),
+        ):
+            self.assertEqual(
+                run_weekly(
+                    "alpha", run_day.isoformat(), self.config_dir, self.home, digest
+                ),
+                0,
+            )
+        self.assertIn(
+            "[RED] alpha: soul baseline check failed",
+            alert_output.read_text(encoding="utf-8"),
+        )
+
+    def test_weekly_alert_failure_preserves_red_digest_and_success_exit(self) -> None:
+        run_day = _jst_today() - timedelta(days=1)
+        self.write_soul_manifest()
+        self.write_usage(run_day, [])
+        self.soul_source.write_text('{"fixture":"mutated"}\n', encoding="utf-8")
+        growth, mirror, profile = load_configs("alpha", self.config_dir)
+        growth["soul_alert_argv"] = ["unused"]
+        digest = Digest(self.home, run_day.isoformat())
+        with (
+            mock.patch(
+                "mirror.weekly.load_configs", return_value=(growth, mirror, profile)
+            ),
+            mock.patch.dict(os.environ, self.env, clear=False),
+            mock.patch(
+                "growthlane.notify.subprocess.run", side_effect=TypeError("unexpected")
+            ),
+        ):
+            self.assertEqual(
+                run_weekly(
+                    "alpha", run_day.isoformat(), self.config_dir, self.home, digest
+                ),
+                0,
+            )
+        digest_text = self.digest_text(run_day)
+        self.assertIn("[RED] alpha: mirror soul check failed", digest_text)
+        self.assertIn(
+            "[WARN] alpha: soul alert delivery failed: unexpected", digest_text
+        )
+        self.assertIn("Soul check: MISMATCH", self.weekly_report_text(run_day))
 
     def test_weekly_tier_s_preserves_no_baseline(self) -> None:
         run_day = _jst_today()

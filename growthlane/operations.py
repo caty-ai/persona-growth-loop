@@ -903,9 +903,28 @@ def baseline_main(argv: list[str] | None = None) -> int:
         pinned_files = ",".join(
             f"{item['path']}@{item['sha256']}" for item in pinned
         )
+        coverage_parts: list[str] = []
+        for item in pinned:
+            coverage = item.get("coverage")
+            if not isinstance(coverage, dict):
+                continue
+            sections = coverage.get("sections")
+            if not isinstance(sections, list):
+                continue
+            section_sizes = ", ".join(
+                f"{section['prefix']!r}={section['lines']} lines/{section['bytes']} bytes"
+                for section in sections
+                if isinstance(section, dict)
+            )
+            coverage_parts.append(
+                f"{item['path']}[{section_sizes}; markers={coverage.get('markers')}]"
+            )
+        coverage_text = (
+            f" coverage={'; '.join(coverage_parts)}" if coverage_parts else ""
+        )
         digest.emit(
             f"{profile.name}: baseline pinned overlay_home={new_home} "
-            f"files={pinned_files}"
+            f"files={pinned_files}{coverage_text}"
         )
         print(path)
         return 0

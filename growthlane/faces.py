@@ -9,6 +9,29 @@ from typing import Callable, Mapping
 
 ALPHA_SOUL_ROOTS = ("~/.claude",)
 LUCA_SOUL_ROOTS = ("persona-engine/manifest.yml", "persona-engine/catalogs")
+ALPHA_OVERLAY_MARKER = "faces/alpha/overlay.md"
+
+
+@dataclass(frozen=True)
+class SoulSectionSpec:
+    path: str
+    heading_prefixes: tuple[str, ...]
+    line_markers: tuple[str, ...]
+    extract: str
+
+
+ALPHA_SOUL_SECTION_SPECS = (
+    SoulSectionSpec(
+        path="~/.claude/CLAUDE.md",
+        heading_prefixes=(
+            "### Identity (アルファ)",
+            "### Warmth Persona Core v1",
+            "### F. 関係の記憶",
+        ),
+        line_markers=(ALPHA_OVERLAY_MARKER,),
+        extract="alpha-soul-v1",
+    ),
+)
 
 
 @dataclass(frozen=True)
