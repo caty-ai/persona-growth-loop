@@ -191,9 +191,20 @@ class MirrorIOTests(unittest.TestCase):
             )
 
             def replace_with_live_lock(_lock: Path) -> tuple[datetime, int, str]:
+                stale_inode = os.lstat(lock).st_ino
                 owner.unlink()
                 lock.rmdir()
-                lock.mkdir()
+                # ext4 may immediately reuse the freed inode, making the recreated directory
+                # indistinguishable to the production identity check. Decoys deterministically
+                # force the identity-mismatch branch; the coincidence gap is tracked in issue #7.
+                for index in range(8):
+                    (lock.parent / f"decoy-{index}").mkdir()
+                    lock.mkdir()
+                    if os.lstat(lock).st_ino != stale_inode:
+                        break
+                    lock.rmdir()
+                else:
+                    self.fail("could not obtain a distinct lock inode")
                 owner.write_text(
                     json.dumps(
                         {

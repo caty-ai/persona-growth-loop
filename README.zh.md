@@ -9,7 +9,7 @@
 [![tests](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml/badge.svg)](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![python](https://img.shields.io/badge/python-3.14%2B-3776AB?logo=python&logoColor=white)
-![platform](https://img.shields.io/badge/platform-macOS-lightgrey)
+![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20(CI)-lightgrey)
 
 Persona Growth Loop（PGL）让长期运行的 AI 智能体从真实对话中<br>
 逐步养成自己的说话风格 —— 同时核心人格始终冻结、不可触碰。<br>
@@ -99,10 +99,9 @@ flowchart LR
 |---|---|
 | Python 3.14+（唯一依赖：PyYAML） | ✅ CI 与日常开发均为 3.14 |
 | macOS | ✅ 日常生产环境使用中 |
+| Linux (Ubuntu) | ✅ CI 中运行完整测试套件（少数 macOS 专用集成测试按设计跳过；调度模板仅提供 launchd/macOS） |
 | 以 Claude Code 作为被观测的智能体（本地 face） | ✅ 已在生产环境中运行 |
 | 通过 SSH 连接的远程 persona 引擎（引擎 face） | ✅ 观测已在生产环境中运行；注入功能仍在审批闸门之后 |
-
-> **注：** Linux 尚未验证 — 测试套件的一部分假定 macOS 的文件系统布局。见 [issue #1](https://github.com/caty-ai/persona-growth-loop/issues/1)（CI 中有仅供参考的 Linux 任务）。
 
 支持其他智能体运行时是推广计划中的设计目标，但目前尚未接入 —— 如果你的环境和上面这两个 face 不同，请把 PGL 当作参考架构来看待，而不是开箱即用的方案。
 

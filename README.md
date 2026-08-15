@@ -9,7 +9,7 @@
 [![tests](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml/badge.svg)](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![python](https://img.shields.io/badge/python-3.14%2B-3776AB?logo=python&logoColor=white)
-![platform](https://img.shields.io/badge/platform-macOS-lightgrey)
+![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20(CI)-lightgrey)
 
 Persona Growth Loop (PGL) lets a long-running AI agent grow its own speaking style<br>
 from real conversations — while its core personality stays frozen and untouchable.<br>
@@ -99,10 +99,9 @@ This safety net is not a promise — it is code you can run. Which brings us to 
 |---|---|
 | Python 3.14+ (single dependency: PyYAML) | ✅ CI and daily development on 3.14 |
 | macOS | ✅ daily production use |
+| Linux (Ubuntu) | ✅ full test suite in CI (a few macOS-only integration tests are skipped by design; scheduling templates are launchd/macOS) |
 | Claude Code as the observed agent (local face) | ✅ in production |
 | A remote persona engine over SSH (engine face) | ✅ observation in production; injection behind its approval gate |
-
-> **Note:** Linux is not verified yet — parts of the test suite assume macOS filesystem layout. Tracked in [issue #1](https://github.com/caty-ai/persona-growth-loop/issues/1); the CI runs an advisory Linux job.
 
 Other agent runtimes are a design goal of the rollout plan but are not wired yet — if your setup differs from the two faces above, treat PGL as a reference architecture rather than a drop-in.
 

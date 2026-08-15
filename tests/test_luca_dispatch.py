@@ -16,6 +16,8 @@ import unittest
 import urllib.error
 from unittest import mock
 
+from tests.support import MACOS_RSYNC_CLIENT_SKIP_REASON
+
 
 REPO = Path(__file__).resolve().parents[1]
 DISPATCH = REPO / "vps" / "pgl-luca-dispatch"
@@ -820,6 +822,10 @@ raise SystemExit(0 if not issues else 2)
         self.assert_rejected("deploy backup", role="deploy")
 
     @unittest.skipUnless(HAS_REAL_RSYNC, "/usr/bin/rsync unavailable")
+    @unittest.skipUnless(
+        sys.platform == "darwin",
+        MACOS_RSYNC_CLIENT_SKIP_REASON,
+    )
     def test_deploy_transfer_real_rsync_push_lands_under_pack_and_deletes_removed_entries(self):
         self._install_real_server_rsync()
         source = self.root / "transfer-source"
@@ -1019,6 +1025,23 @@ raise SystemExit(0 if not issues else 2)
         cases = [
             ("--server", "-rptD", ".", "/home/admin/.persona-engine/luca/pack"),
             ("--server", "--specials", ".", "/home/admin/.persona-engine/luca/pack"),
+        ]
+        for trailing in cases:
+            with self.subTest(trailing=trailing):
+                with self.assertRaises(module.DispatchError):
+                    module._validated_transfer_argv(self.install, trailing)
+
+    def test_transfer_argv_rejects_foreign_destination_before_exec(self):
+        module = load_dispatch_module("luca_dispatch_destination_gate")
+        cases = [
+            ("--server", "-rpt", ".", "/tmp/not-pack"),
+            (
+                "--server",
+                "-rpt",
+                ".",
+                "/home/admin/.persona-engine/luca/pack/../escape",
+            ),
+            ("--server", "-rpt", "not-dot", "/home/admin/.persona-engine/luca/pack"),
         ]
         for trailing in cases:
             with self.subTest(trailing=trailing):

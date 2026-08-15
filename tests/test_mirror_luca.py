@@ -8,7 +8,6 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +22,7 @@ from growthlane.notify import Digest
 from mirror.common import MirrorError, injected_bytes, load_configs
 from mirror.staging import StagingBuild, regenerate_staging
 from mirror.weekly import fetch_luca_production_digest, luca_parity, run_weekly
+from support import canonical_temporary_directory
 from test_mirror_support import MirrorHarness
 
 
@@ -61,7 +61,7 @@ def _persona_content_hash(pack: Path) -> str:
 
 class LucaFixture(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(dir="/private/tmp")
+        self.temporary = canonical_temporary_directory()
         self.root = Path(self.temporary.name)
         self.clone = self.root / "luca-repo"
         self.staging = self.root / "luca-staging"

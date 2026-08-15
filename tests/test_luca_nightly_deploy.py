@@ -6,6 +6,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
@@ -19,6 +20,7 @@ from collectors.hermes_luca import journal
 from collectors.hermes_luca.adapters import Turn
 from growthlane import deploy, nightly
 from tests import test_luca_dispatch as dispatch_tests
+from tests.support import MACOS_RSYNC_CLIENT_SKIP_REASON
 
 
 CONTENT_HASH = "a" * 64
@@ -1091,6 +1093,10 @@ class LucaNightlyDeployTests(unittest.TestCase):
         self.assertEqual(commands, [])
 
     @unittest.skipUnless(dispatch_tests.HAS_REAL_RSYNC, "/usr/bin/rsync unavailable")
+    @unittest.skipUnless(
+        sys.platform == "darwin",
+        MACOS_RSYNC_CLIENT_SKIP_REASON,
+    )
     def test_real_dispatcher_surface_via_fake_ssh_and_real_rsync(self) -> None:
         fixture = dispatch_tests.LucaDispatchTests(
             "test_deploy_transfer_real_rsync_push_lands_under_pack_and_deletes_removed_entries"
