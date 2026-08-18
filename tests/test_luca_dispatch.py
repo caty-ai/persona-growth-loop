@@ -1149,16 +1149,13 @@ if exit_path.is_file():
 
     def test_deploy_transfer_rejects_post_transfer_size_over_cap(self):
         self.rsync_path.write_text(
-            "#!/usr/bin/env python3\n"
-            "import sys\n"
-            "from pathlib import Path\n"
-            "import os\n"
-            "if len(sys.argv) > 1 and sys.argv[1] == '--version':\n"
-            "    print('rsync  version 3.4.0  protocol version 31')\n"
-            "    raise SystemExit(0)\n"
-            "target = Path(os.getcwd()) / 'pack/catalogs/oversized.bin'\n"
-            "target.parent.mkdir(parents=True, exist_ok=True)\n"
-            "target.write_bytes(b'x' * 32)\n",
+            "#!/bin/sh\n"
+            "if [ \"$1\" = \"--version\" ]; then\n"
+            "  printf 'rsync  version 3.4.0  protocol version 31\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            "mkdir -p pack/catalogs\n"
+            "printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' > pack/catalogs/oversized.bin\n",
             encoding="utf-8",
         )
         self.rsync_path.chmod(0o755)
