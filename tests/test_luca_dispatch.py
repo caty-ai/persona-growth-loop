@@ -1,12 +1,18 @@
+import contextlib
 import hashlib
+import http.client
 import http.server
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
+import re
+import select
 import shutil
 import sqlite3
+import socket
 import subprocess
 import sys
 import tempfile
@@ -26,6 +32,10 @@ ERROR_LINE = "pgl-luca-dispatch: request rejected\n"
 HAS_REAL_RSYNC = Path("/usr/bin/rsync").is_file()
 
 
+def reason_line(code):
+    return f"pgl-luca-dispatch: request rejected: {code}\n"
+
+
 def load_dispatch_module(name):
     loader = importlib.machinery.SourceFileLoader(name, str(DISPATCH))
     spec = importlib.util.spec_from_loader(name, loader)
@@ -34,6 +44,21 @@ def load_dispatch_module(name):
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
+
+
+class HeldAcceptResponse:
+    def __init__(self):
+        self.closed = False
+        self.close_calls = 0
+        self.read_calls = 0
+
+    def close(self):
+        self.close_calls += 1
+        self.closed = True
+
+    def read(self, *_arguments, **_kwargs):
+        self.read_calls += 1
+        raise AssertionError("accept response body was read")
 
 
 def content_hash(pack: Path) -> str:
@@ -55,6 +80,16 @@ def content_hash(pack: Path) -> str:
         digest.update(data)
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _peer_disconnected(connection):
+    readable, _, _ = select.select([connection], [], [], 0)
+    if not readable:
+        return False
+    try:
+        return connection.recv(1, socket.MSG_PEEK) == b""
+    except OSError:
+        return True
 
 
 class LucaDispatchTests(unittest.TestCase):
@@ -271,7 +306,45 @@ raise SystemExit(0 if not issues else 2)
         self.rsync_path.chmod(0o755)
         self.systemctl_path = self.root / "usr/bin/systemctl"
         self.systemctl_path.write_text(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PWD/systemctl.argv\"\n",
+            f"""#!{python}
+import os
+from pathlib import Path
+import sys
+import time
+
+ROOT = Path({str(self.root)!r})
+arguments = sys.argv[1:]
+line = " ".join(arguments)
+log = Path.cwd() / "systemctl.argv"
+with log.open("a", encoding="utf-8") as stream:
+    stream.write(line + "\\n")
+with (Path.cwd() / "systemctl.env").open("a", encoding="utf-8") as stream:
+    stream.write(
+        os.environ.get("XDG_RUNTIME_DIR", "")
+        + "|"
+        + os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+        + "\\n"
+    )
+
+if len(arguments) >= 2 and arguments[1] == "restart":
+    stem = "systemctl.restart"
+elif len(arguments) == 4 and arguments[1:3] == ["is-active", "--quiet"]:
+    unit = arguments[3]
+    matching = [entry for entry in log.read_text(encoding="utf-8").splitlines() if entry == line]
+    stem = f"systemctl.is-active.{{unit}}.{{len(matching)}}"
+    fallback = ROOT / f"systemctl.is-active.{{unit}}.exit"
+else:
+    raise SystemExit(99)
+
+sleep_path = ROOT / (stem + ".sleep")
+if sleep_path.is_file():
+    time.sleep(float(sleep_path.read_text(encoding="ascii")))
+exit_path = ROOT / (stem + ".exit")
+if not exit_path.is_file() and "fallback" in globals():
+    exit_path = fallback
+if exit_path.is_file():
+    raise SystemExit(int(exit_path.read_text(encoding="ascii")))
+""",
             encoding="utf-8",
         )
         self.systemctl_path.chmod(0o755)
@@ -1076,16 +1149,13 @@ raise SystemExit(0 if not issues else 2)
 
     def test_deploy_transfer_rejects_post_transfer_size_over_cap(self):
         self.rsync_path.write_text(
-            "#!/usr/bin/python3\n"
-            "import sys\n"
-            "from pathlib import Path\n"
-            "import os\n"
-            "if len(sys.argv) > 1 and sys.argv[1] == '--version':\n"
-            "    print('rsync  version 3.4.0  protocol version 31')\n"
-            "    raise SystemExit(0)\n"
-            "target = Path(os.getcwd()) / 'pack/catalogs/oversized.bin'\n"
-            "target.parent.mkdir(parents=True, exist_ok=True)\n"
-            "target.write_bytes(b'x' * 32)\n",
+            "#!/bin/sh\n"
+            "if [ \"$1\" = \"--version\" ]; then\n"
+            "  printf 'rsync  version 3.4.0  protocol version 31\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            "mkdir -p pack/catalogs\n"
+            "printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' > pack/catalogs/oversized.bin\n",
             encoding="utf-8",
         )
         self.rsync_path.chmod(0o755)
@@ -1504,46 +1574,181 @@ raise SystemExit(0 if not issues else 2)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             (self.install / "systemctl.argv").read_text(encoding="utf-8").splitlines(),
-            ["--user", "restart", "hermes-gateway-luca", "hermes-api-luca"],
+            [
+                "--user restart hermes-gateway-luca hermes-api-luca",
+                "--user is-active --quiet hermes-gateway-luca",
+                "--user is-active --quiet hermes-api-luca",
+                "--user is-active --quiet hermes-gateway-luca",
+                "--user is-active --quiet hermes-api-luca",
+                "--user is-active --quiet hermes-gateway-luca",
+                "--user is-active --quiet hermes-api-luca",
+            ],
+        )
+        runtime_dir = f"/run/user/{os.getuid()}"
+        self.assertEqual(
+            (self.install / "systemctl.env").read_text(encoding="utf-8").splitlines(),
+            [f"{runtime_dir}|unix:path={runtime_dir}/bus"] * 7,
         )
 
+    def test_restart_rejects_mixed_unit_state_on_first_or_later_sample(self):
+        for sample in (1, 2):
+            with self.subTest(sample=sample):
+                for path in self.root.glob("systemctl.*.exit"):
+                    path.unlink()
+                for path in (self.install / "systemctl.argv", self.install / "systemctl.env"):
+                    path.unlink(missing_ok=True)
+                (self.root / f"systemctl.is-active.hermes-api-luca.{sample}.exit").write_text(
+                    "3\n", encoding="ascii"
+                )
+                result = self.run_dispatch("deploy restart", role="deploy")
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr, reason_line("restart-units-not-active"))
+
+    def test_restart_nonzero_reports_command_failed(self):
+        (self.root / "systemctl.restart.exit").write_text("1\n", encoding="ascii")
+        result = self.run_dispatch("deploy restart", role="deploy")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, reason_line("restart-command-failed"))
+
+    def test_restart_timeout_constant_is_plumbed_to_fixed_command(self):
+        (self.root / "systemctl.restart.sleep").write_text("2\n", encoding="ascii")
+        module = load_dispatch_module("luca_dispatch_restart_timeout")
+        with mock.patch.object(module, "_RESTART_TIMEOUT_SECONDS", 1):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._restart(self.systemctl_path, self.install)
+        self.assertEqual(caught.exception.reason_code, "restart-command-timeout")
+
+    def test_restart_verify_timeout_reports_verification_failed(self):
+        (self.root / "systemctl.is-active.hermes-gateway-luca.1.sleep").write_text(
+            "0.2\n", encoding="ascii"
+        )
+        module = load_dispatch_module("luca_dispatch_restart_verify_timeout")
+        with mock.patch.object(module, "_RESTART_VERIFY_TIMEOUT_SECONDS", 0.05):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._restart(self.systemctl_path, self.install)
+        self.assertEqual(caught.exception.reason_code, "restart-verification-failed")
+
+    def test_restart_verify_oserror_reports_verification_failed(self):
+        module = load_dispatch_module("luca_dispatch_restart_verify_oserror")
+        calls = 0
+
+        def run_fixed(*_arguments, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return None
+            raise module._FixedCommandExecutionError("fixed command failed")
+
+        with mock.patch.object(module, "_run_fixed", side_effect=run_fixed):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._restart(self.systemctl_path, self.install)
+        self.assertEqual(caught.exception.reason_code, "restart-verification-failed")
+
+    def test_restart_budget_dominates_stop_timeouts_and_stays_below_client_cap(self):
+        module = load_dispatch_module("luca_dispatch_restart_budget")
+        self.assertGreaterEqual(module._RESTART_TIMEOUT_SECONDS, 2 * 90 + 30)
+        total = (
+            module._RESTART_TIMEOUT_SECONDS
+            + module._RESTART_VERIFY_SAMPLES
+            * len(module._SYSTEMD_UNITS)
+            * module._RESTART_VERIFY_TIMEOUT_SECONDS
+            + (module._RESTART_VERIFY_SAMPLES - 1)
+            * module._RESTART_VERIFY_DWELL_SECONDS
+        )
+        self.assertLess(total, 300)
+
     def _run_accept_server(self):
-        requests = []
-        session_id = "12345678-1234-1234-1234-123456789abc"
+        records = []
+        session_ids = (
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+            "33333333-3333-4333-8333-333333333333",
+        )
+        record_lock = threading.Lock()
         install = self.install
         manifest = json.loads((self.build / "manifest.json").read_text(encoding="utf-8"))
 
         class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
             def do_POST(handler):
                 length = int(handler.headers["Content-Length"])
                 body = json.loads(handler.rfile.read(length))
-                requests.append((handler.path, handler.headers.get("Authorization"), body))
-                if handler.path != "/v1/responses" or handler.headers.get("Authorization") != "Bearer fixture-secret":
+                with record_lock:
+                    if len(records) >= len(session_ids):
+                        handler.send_error(
+                            500, "unexpected extra request beyond fixture session_ids"
+                        )
+                        return
+                    session_id = session_ids[len(records)]
+                    record = {
+                        "path": handler.path,
+                        "authorization": handler.headers.get("Authorization"),
+                        "body": body,
+                        "session_id": session_id,
+                        "body_writes": 0,
+                        "status_writes": 0,
+                        "status_write_while_open": False,
+                        "disconnect_exception": None,
+                        "disconnect_observed": threading.Event(),
+                        "stream_completed": False,
+                        "connection": handler.connection,
+                    }
+                    records.append(record)
+                if (
+                    handler.path != "/v1/responses"
+                    or handler.headers.get("Authorization") != "Bearer fixture-secret"
+                    or body.get("stream") is not True
+                    or not isinstance(body.get("conversation"), str)
+                ):
                     handler.send_error(403)
                     return
                 utterance = body["input"]
-                if utterance.startswith("/persona "):
-                    mode = utterance.split(" ", 1)[1]
-                    if mode == "public":
-                        block_bytes = 0
-                        block_sha256 = hashlib.sha256(b"").hexdigest()
-                    else:
-                        metadata = manifest["modes"][mode]
-                        block_bytes = metadata["bytes"]
-                        block_sha256 = metadata["sha256"]
-                    status = {
-                        "mode": mode,
-                        "block_bytes": block_bytes,
-                        "block_sha256": block_sha256,
-                    }
-                    (install / "state/status.json").write_text(
-                        json.dumps(status), encoding="utf-8"
-                    )
+                mode = "public" if utterance == "deployment warm-up" else utterance.split(" ", 1)[1]
+                if mode == "public":
+                    block_bytes = 0
+                    block_sha256 = hashlib.sha256(b"").hexdigest()
+                else:
+                    metadata = manifest["modes"][mode]
+                    block_bytes = metadata["bytes"]
+                    block_sha256 = metadata["sha256"]
                 handler.send_response(200)
+                handler.send_header("Content-Type", "text/event-stream")
                 handler.send_header("X-Hermes-Session-Id", session_id)
-                handler.send_header("Content-Length", "2")
+                handler.send_header("Connection", "close")
                 handler.end_headers()
-                handler.wfile.write(b"{}")
+                try:
+                    handler.wfile.write(b"data: unread-body-bytes\n\n")
+                    handler.wfile.flush()
+                    record["body_writes"] += 1
+                    status_write_while_open = not _peer_disconnected(
+                        handler.connection
+                    )
+                    (install / "state/status.json").write_text(
+                        json.dumps(
+                            {
+                                "ts": "2026-08-17T12:00:00.000Z",
+                                "mode": mode,
+                                "block_bytes": block_bytes,
+                                "block_sha256": block_sha256,
+                                "turn_key": session_id + ":fixture:abcdef12",
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    record["status_writes"] += 1
+                    record["status_write_while_open"] = status_write_while_open
+                    while True:
+                        handler.wfile.write(b"data: unread-body-bytes\n\n")
+                        handler.wfile.flush()
+                        record["body_writes"] += 1
+                except (BrokenPipeError, ConnectionResetError) as exc:
+                    record["disconnect_exception"] = exc
+                    record["disconnect_observed"].set()
+                    return
+                record["stream_completed"] = True
 
             def log_message(self, _format, *_arguments):
                 pass
@@ -1551,18 +1756,7 @@ raise SystemExit(0 if not issues else 2)
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        state = self.install / "state"
-        state.mkdir(exist_ok=True)
-        (state / "status.json").write_text(
-            json.dumps(
-                {
-                    "mode": "public",
-                    "block_bytes": 0,
-                    "block_sha256": hashlib.sha256(b"").hexdigest(),
-                }
-            ),
-            encoding="utf-8",
-        )
+        self._write_accept_status("public")
         config = self.root / "home/admin/.config/caty-gateway/luca-hermes-api.env"
         config.parent.mkdir(parents=True)
         config.write_text(
@@ -1570,29 +1764,129 @@ raise SystemExit(0 if not issues else 2)
             encoding="utf-8",
         )
         config.chmod(0o600)
-        return server, thread, requests, session_id
+        return server, thread, records, session_ids
 
-    def test_accept_uses_loopback_token_restores_pre_mode_and_returns_uuid_array(self):
-        try:
-            server, thread, requests, session_id = self._run_accept_server()
-        except PermissionError:
-            self.skipTest("loopback bind unavailable in this sandbox")
-        else:
+    def _stop_accept_server(self, server, thread, records):
+        server.shutdown()
+        for record in records:
+            connection = record["connection"]
             try:
-                result = self.run_dispatch("accept", role="deploy")
-            finally:
-                server.shutdown()
-                thread.join(timeout=5)
-                server.server_close()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), [session_id])
-        status = json.loads((self.install / "state/status.json").read_text(encoding="utf-8"))
-        self.assertEqual(status["mode"], "public")
+                connection.shutdown(2)
+            except OSError:
+                pass
+            connection.close()
+        server.server_close()
+        if thread is not None:
+            thread.join(timeout=1)
+
+    def _assert_accept_streams_held(self, records):
+        for item in records:
+            self.assertTrue(item["held_at_writes"])
+            self.assertTrue(all(item["held_at_writes"]))
+
+    def test_accept_real_streams_persist_owned_status_before_client_disconnect(self):
+        module = load_dispatch_module("luca_dispatch_accept_real_streams")
+        server, thread, records, session_ids = self._run_accept_server()
+        client_body_reads = []
+
+        def reject_body_read(response, *_arguments, **_kwargs):
+            client_body_reads.append(response)
+            raise AssertionError("accept response body was read")
+
+        try:
+            config = self.root / "home/admin/.config/caty-gateway/luca-hermes-api.env"
+            with mock.patch.object(http.client.HTTPResponse, "read", reject_body_read):
+                output = module._accept(
+                    self.install, config, self.root / "backups", "standard"
+                )
+            for record in records:
+                self.assertTrue(record["disconnect_observed"].wait(timeout=1))
+        finally:
+            self._stop_accept_server(server, thread, records)
+
+        self.assertEqual(json.loads(output), sorted(session_ids))
         self.assertEqual(
-            [entry[2]["input"] for entry in requests],
+            [record["body"]["input"] for record in records],
             ["deployment warm-up", "/persona mode-b", "/persona public"],
         )
-        self.assertNotIn("fixture-secret", result.stdout + result.stderr)
+        self.assertEqual([record["path"] for record in records], ["/v1/responses"] * 3)
+        self.assertEqual(
+            [record["authorization"] for record in records],
+            ["Bearer fixture-secret"] * 3,
+        )
+        self.assertTrue(all(record["body"]["stream"] is True for record in records))
+        self.assertEqual(len({record["body"]["conversation"] for record in records}), 3)
+        self.assertEqual(client_body_reads, [])
+        self.assertEqual(
+            json.loads((self.install / "state/status.json").read_text(encoding="utf-8"))[
+                "mode"
+            ],
+            "public",
+        )
+        for record in records:
+            self.assertGreater(record["body_writes"], 0)
+            self.assertEqual(record["status_writes"], 1)
+            self.assertTrue(record["status_write_while_open"])
+            self.assertIsInstance(
+                record["disconnect_exception"],
+                (BrokenPipeError, ConnectionResetError),
+            )
+            self.assertFalse(record["stream_completed"])
+
+    def test_peer_disconnected_probe_discriminates(self):
+        left, right = socket.socketpair()
+        try:
+            self.assertFalse(_peer_disconnected(left))
+            right.sendall(b"x")
+            self.assertFalse(_peer_disconnected(left))
+            self.assertEqual(left.recv(1), b"x")
+            right.close()
+            self.assertTrue(_peer_disconnected(left))
+        finally:
+            left.close()
+
+    def test_accept_uses_loopback_token_restores_pre_mode_and_returns_uuid_array(self):
+        module = load_dispatch_module("luca_dispatch_accept_success")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "mode-b"}]},
+            {"writes": [{"mode": "public"}]},
+        ]
+        with self._scripted_accept(module, steps) as records:
+            output = module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(len(json.loads(output)), 3)
+        self.assertEqual([item["utterance"] for item in records], [
+            "deployment warm-up", "/persona mode-b", "/persona public"
+        ])
+        self.assertNotIn(b"fixture-secret", output)
+
+    def test_accept_settles_when_server_responds_before_status_write(self):
+        module = load_dispatch_module("luca_dispatch_headers_before_status")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "mode-b"}]},
+            {"writes": [{"mode": "public"}]},
+        ]
+        with self._scripted_accept(module, steps) as records:
+            module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertTrue(all(item["held_at_writes"] == [True] for item in records))
+
+    def test_accept_settles_across_torn_intermediate_switch_reread(self):
+        module = load_dispatch_module("luca_dispatch_accept_torn_reread")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"unreadable": True}, {"mode": "mode-b"}]},
+            {"writes": [{"mode": "public"}]},
+        ]
+        with self._scripted_accept(module, steps):
+            output = module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(len(json.loads(output)), 3)
 
     def test_accept_transport_disables_proxies_and_redirects(self):
         module = load_dispatch_module("luca_dispatch_transport")
@@ -1600,15 +1894,20 @@ raise SystemExit(0 if not issues else 2)
         response.headers.get_all.return_value = [
             "12345678-1234-1234-1234-123456789abc"
         ]
-        response.read.return_value = b"{}"
+        response.read.side_effect = AssertionError("accept response body was read")
         opener = mock.MagicMock()
-        opener.open.return_value.__enter__.return_value = response
+        opener.open.return_value = response
         with mock.patch.object(
             module.urllib.request, "build_opener", return_value=opener
         ) as build_opener:
-            session_id = module._send_accept_turn(
-                "fixture-secret", 4321, "fixed-conversation", "deployment warm-up"
+            held, session_id = module._open_accept_stream(
+                "fixture-secret",
+                4321,
+                "fixed-conversation",
+                "deployment warm-up",
+                module._time.monotonic() + 30,
             )
+        self.assertIs(held, response)
         self.assertEqual(session_id, "12345678-1234-1234-1234-123456789abc")
         handlers = build_opener.call_args.args
         self.assertTrue(any(isinstance(item, module.urllib.request.ProxyHandler) for item in handlers))
@@ -1620,7 +1919,16 @@ raise SystemExit(0 if not issues else 2)
         request = opener.open.call_args.args[0]
         self.assertEqual(request.full_url, "http://127.0.0.1:4321/v1/responses")
         self.assertEqual(request.get_header("Authorization"), "Bearer fixture-secret")
-        self.assertEqual(opener.open.call_args.kwargs["timeout"], 30)
+        self.assertEqual(
+            json.loads(request.data),
+            {
+                "input": "deployment warm-up",
+                "conversation": "fixed-conversation",
+                "stream": True,
+            },
+        )
+        self.assertEqual(opener.open.call_args.kwargs["timeout"], 15)
+        response.read.assert_not_called()
 
     def test_accept_transport_rejects_redirects_cleanly(self):
         module = load_dispatch_module("luca_dispatch_redirect")
@@ -1636,9 +1944,28 @@ raise SystemExit(0 if not issues else 2)
             module.urllib.request, "build_opener", return_value=opener
         ):
             with self.assertRaises(module.DispatchError):
-                module._send_accept_turn(
-                    "fixture-secret", 4321, "fixed-conversation", "deployment warm-up"
+                module._open_accept_stream(
+                    "fixture-secret",
+                    4321,
+                    "fixed-conversation",
+                    "deployment warm-up",
+                    module._time.monotonic() + 30,
                 )
+
+    def test_accept_transport_slow_server_raises_timeout_subclass(self):
+        module = load_dispatch_module("luca_dispatch_accept_slow_server")
+        opener = mock.MagicMock()
+        opener.open.side_effect = TimeoutError()
+        with mock.patch.object(module.urllib.request, "build_opener", return_value=opener):
+            with mock.patch.object(module, "_ACCEPT_OPEN_TIMEOUT_SECONDS", 0.05):
+                with self.assertRaises(module._AcceptRequestTimeout):
+                    module._open_accept_stream(
+                        "fixture-secret",
+                        4321,
+                        "fixed-conversation",
+                        "/persona mode-b",
+                        module._time.monotonic() + 1,
+                    )
 
     def test_accept_config_enforces_0o077_permission_gate(self):
         config = self.root / "home/admin/.config/caty-gateway/luca-hermes-api.env"
@@ -1650,6 +1977,909 @@ raise SystemExit(0 if not issues else 2)
             module._accept_config(config)
         config.chmod(0o600)
         self.assertEqual(module._accept_config(config), ("fixture-secret", 1))
+
+    def _write_accept_status(
+        self,
+        mode,
+        *,
+        block_bytes=None,
+        block_sha256=None,
+        turn_key="00000000-0000-0000-0000-000000000000:fixture:abcdef12",
+        ts="2026-08-17T12:00:00.000Z",
+    ):
+        if mode == "public":
+            expected_bytes = 0
+            expected_sha256 = hashlib.sha256(b"").hexdigest()
+        else:
+            manifest = json.loads(
+                (self.build / "manifest.json").read_text(encoding="utf-8")
+            )
+            metadata = manifest["modes"][mode]
+            expected_bytes = metadata["bytes"]
+            expected_sha256 = metadata["sha256"]
+        state = self.install / "state"
+        state.mkdir(exist_ok=True)
+        (state / "status.json").write_text(
+            json.dumps(
+                {
+                    "ts": ts,
+                    "mode": mode,
+                    "block_bytes": expected_bytes if block_bytes is None else block_bytes,
+                    "block_sha256": (
+                        expected_sha256 if block_sha256 is None else block_sha256
+                    ),
+                    "turn_key": turn_key,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _write_accept_config(self):
+        config = self.root / "home/admin/.config/caty-gateway/luca-hermes-api.env"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            "API_SERVER_KEY=fixture-secret\nAPI_SERVER_PORT=1\n",
+            encoding="utf-8",
+        )
+        config.chmod(0o600)
+        return config
+
+    def _patch_accept_open(self, module, send_turn, responses=None, conversations=None):
+        responses = [] if responses is None else responses
+        conversations = [] if conversations is None else conversations
+        module._ACCEPT_OPEN_TIMEOUT_SECONDS = 0.5
+        module._ACCEPT_WARMUP_WINDOW_SECONDS = 0.5
+        module._ACCEPT_SWITCH_WINDOW_SECONDS = 0.5
+        module._ACCEPT_RESTORE_WINDOW_SECONDS = 0.5
+        module._ACCEPT_POLL_INTERVAL_SECONDS = 0.001
+        module._ACCEPT_DISCONNECT_HORIZON_SECONDS = 0.002
+        module._ACCEPT_RESTORE_RESERVED_SECONDS = 1.5
+        module._ACCEPT_DEADLINE_SECONDS = 10.0
+
+        def open_stream(token, port, conversation, utterance, _deadline):
+            conversations.append(conversation)
+            session_id = send_turn(token, port, conversation, utterance)
+            status_path = self.install / "state/status.json"
+            if status_path.is_file():
+                try:
+                    status = json.loads(status_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    status = None
+                if isinstance(status, dict):
+                    status["ts"] = "2026-08-17T12:00:00.000Z"
+                    status["turn_key"] = session_id + ":fixture:abcdef12"
+                    status_path.write_text(json.dumps(status), encoding="utf-8")
+            response = mock.MagicMock()
+            response.read.side_effect = AssertionError("accept response body was read")
+            responses.append(response)
+            return response, session_id
+
+        return mock.patch.object(module, "_open_accept_stream", side_effect=open_stream)
+
+    @contextlib.contextmanager
+    def _scripted_accept(self, module, steps, *, deadline=10.0, horizon=0.002):
+        original_status = module._status
+        records = []
+        pending = []
+        module._ACCEPT_OPEN_TIMEOUT_SECONDS = 0.5
+        module._ACCEPT_WARMUP_WINDOW_SECONDS = 0.5
+        module._ACCEPT_SWITCH_WINDOW_SECONDS = 0.5
+        module._ACCEPT_RESTORE_WINDOW_SECONDS = 0.5
+        module._ACCEPT_POLL_INTERVAL_SECONDS = 0.001
+        module._ACCEPT_DISCONNECT_HORIZON_SECONDS = horizon
+        module._ACCEPT_RESTORE_RESERVED_SECONDS = 1.5
+        module._ACCEPT_DEADLINE_SECONDS = deadline
+
+        opener = mock.MagicMock()
+
+        def open_response(request, *, timeout):
+            index = len(records)
+            step = dict(steps[index])
+            error = step.get("error")
+            body = json.loads(request.data)
+            self.assertEqual(request.full_url, "http://127.0.0.1:1/v1/responses")
+            self.assertEqual(request.get_header("Authorization"), "Bearer fixture-secret")
+            self.assertIs(body.get("stream"), True)
+            self.assertIsInstance(body.get("conversation"), str)
+            self.assertTrue(body["conversation"])
+            records.append(
+                {
+                    "conversation": body["conversation"],
+                    "utterance": body["input"],
+                    "response": None,
+                    "session_id": None,
+                    "held_at_writes": [],
+                    "turn_keys_at_writes": [],
+                    "open_timeout": timeout,
+                }
+            )
+            if error is not None:
+                raise error
+            session_id = f"{index + 1:08d}-1111-4111-8111-{index + 1:012d}"
+            response = HeldAcceptResponse()
+            response.headers = mock.MagicMock()
+            response.headers.get_all.return_value = [session_id]
+            records[-1]["response"] = response
+            records[-1]["session_id"] = session_id
+            if step.get("close_at_open"):
+                response.close()
+            writes = list(step.get("writes", []))
+            pending.append(
+                {
+                    "response": response,
+                    "session_id": session_id,
+                    "writes": writes,
+                    "record": records[-1],
+                }
+            )
+            return response
+
+        opener.open.side_effect = open_response
+
+        def read_status(path):
+            while pending and not pending[0]["writes"]:
+                pending.pop(0)
+            if pending and pending[0]["writes"]:
+                current = pending[0]
+                write = dict(current["writes"].pop(0))
+                current["record"]["held_at_writes"].append(
+                    not current["response"].closed
+                )
+                if write.pop("unreadable", False):
+                    path.write_bytes(b"{")
+                else:
+                    owner = write.pop("owner", "self")
+                    if owner == "self":
+                        turn_key = current["session_id"] + ":fixture:abcdef12"
+                    elif owner == "fallback":
+                        turn_key = current["session_id"]
+                    elif owner == "warmup":
+                        turn_key = records[0]["session_id"] + ":fixture:abcdef12"
+                    else:
+                        turn_key = "99999999-9999-4999-8999-999999999999:foreign:abcdef12"
+                    current["record"]["turn_keys_at_writes"].append(turn_key)
+                    self._write_accept_status(turn_key=turn_key, **write)
+            return original_status(path)
+
+        with mock.patch.object(
+            module.urllib.request, "build_opener", return_value=opener
+        ):
+            with mock.patch.object(module, "_status", side_effect=read_status):
+                yield records
+
+    def test_accept_owned_streams_hold_until_each_oracle_and_close_without_reads(self):
+        module = load_dispatch_module("luca_dispatch_owned_streams")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "mode-b"}]},
+            {"writes": [{"mode": "public"}]},
+        ]
+        with self._scripted_accept(module, steps) as records:
+            output = module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(json.loads(output), sorted(item["session_id"] for item in records))
+        self.assertEqual(len({item["conversation"] for item in records}), 3)
+        self.assertEqual(
+            [item["utterance"] for item in records],
+            ["deployment warm-up", "/persona mode-b", "/persona public"],
+        )
+        self._assert_accept_streams_held(records)
+        for item in records:
+            self.assertTrue(item["response"].closed)
+            self.assertEqual(item["response"].close_calls, 1)
+            self.assertEqual(item["response"].read_calls, 0)
+
+    def test_accept_hold_open_assertion_rejects_close_immediately_control(self):
+        module = load_dispatch_module("luca_dispatch_closed_stream_control")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"close_at_open": True, "writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "mode-b"}]},
+            {"writes": [{"mode": "public"}]},
+        ]
+        with self._scripted_accept(module, steps) as records:
+            module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(records[0]["held_at_writes"], [False])
+        with self.assertRaises(AssertionError):
+            self._assert_accept_streams_held(records)
+
+    def test_accept_stale_pre_mode_is_replaced_by_owned_warmup_mode(self):
+        module = load_dispatch_module("luca_dispatch_stale_pre_mode")
+        self._write_accept_status("mode-b")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "mode-b"}]},
+            {"writes": [{"mode": "public"}]},
+        ]
+        with self._scripted_accept(module, steps):
+            output = module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(len(json.loads(output)), 3)
+        self.assertEqual(json.loads((self.install / "state/status.json").read_text())["mode"], "public")
+
+    def test_accept_owned_warmup_at_verify_mode_refuses_degenerate_switch(self):
+        module = load_dispatch_module("luca_dispatch_degenerate_owned_warmup")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        with self._scripted_accept(
+            module, [{"writes": [{"mode": "mode-b"}]}]
+        ) as records:
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-switch-failed")
+        self.assertEqual(len(records), 1)
+        self.assertTrue(records[0]["response"].closed)
+
+    def test_accept_foreign_warmup_persist_cannot_satisfy_oracle(self):
+        module = load_dispatch_module("luca_dispatch_foreign_warmup")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        with self._scripted_accept(
+            module, [{"writes": [{"mode": "public", "owner": "foreign"}]}]
+        ) as records:
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-warmup-timeout")
+        self.assertEqual(len(records), 1)
+
+    def test_accept_preexisting_target_and_unowned_switch_persist_fail(self):
+        module = load_dispatch_module("luca_dispatch_preexisting_target")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "mode-b", "owner": "foreign"}]},
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "public"}]},
+        ]
+        with self._scripted_accept(module, steps) as records:
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-switch-not-applied")
+        self.assertEqual(len(records), 4)
+
+    def test_accept_switch_stale_writer_waits_for_owned_persist(self):
+        module = load_dispatch_module("luca_dispatch_stale_writer")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {
+                "writes": [
+                    {"mode": "mode-b", "owner": "foreign"},
+                    {"mode": "mode-b"},
+                ]
+            },
+            {"writes": [{"mode": "public"}]},
+        ]
+        with self._scripted_accept(module, steps) as records:
+            module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(records[1]["held_at_writes"], [True, True])
+
+    def test_accept_restore_rejects_stale_warmup_owner_on_both_attempts(self):
+        module = load_dispatch_module("luca_dispatch_restore_stale_owner")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "mode-b"}]},
+            {"writes": [{"mode": "public", "owner": "foreign"}]},
+            {"writes": [{"mode": "public", "owner": "foreign"}]},
+        ]
+        with self._scripted_accept(module, steps):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-restore-failed")
+
+    def test_accept_restore_rejects_literal_warmup_turn_key_on_both_attempts(self):
+        module = load_dispatch_module("luca_dispatch_restore_literal_warmup_owner")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "mode-b"}]},
+            {"writes": [{"mode": "public", "owner": "warmup"}]},
+            {"writes": [{"mode": "public", "owner": "warmup"}]},
+        ]
+        with self._scripted_accept(module, steps) as records:
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-restore-failed")
+        stale_warmup_turn_key = records[0]["session_id"] + ":fixture:abcdef12"
+        self.assertTrue(
+            module._owned({"turn_key": stale_warmup_turn_key}, records[0]["session_id"])
+        )
+        self.assertEqual(
+            [records[2]["turn_keys_at_writes"], records[3]["turn_keys_at_writes"]],
+            [[stale_warmup_turn_key], [stale_warmup_turn_key]],
+        )
+        self.assertFalse(
+            module._owned({"turn_key": stale_warmup_turn_key}, records[2]["session_id"])
+        )
+        self.assertFalse(
+            module._owned({"turn_key": stale_warmup_turn_key}, records[3]["session_id"])
+        )
+
+    def test_accept_zombie_flip_cannot_be_certified_by_pre_horizon_restore(self):
+        module = load_dispatch_module("luca_dispatch_zombie_flip")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "public", "owner": "foreign"}]},
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "mode-b", "owner": "foreign"}]},
+        ]
+        with self._scripted_accept(module, steps, horizon=0.002):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-restore-failed")
+
+    def test_accept_deadline_truncated_horizon_never_certifies_restore(self):
+        module = load_dispatch_module("luca_dispatch_truncated_horizon")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "public", "owner": "foreign"}]},
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "public"}]},
+        ]
+        with self._scripted_accept(module, steps, deadline=0.04, horizon=0.05):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-restore-failed")
+
+    def test_accept_horizon_clock_granularity_cannot_shrink_certification_window(self):
+        module = load_dispatch_module("luca_dispatch_horizon_granularity")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "public", "owner": "foreign"}]},
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "public"}]},
+        ]
+        clock = {"now": 0.0}
+
+        def monotonic():
+            return clock["now"]
+
+        def sleep(seconds):
+            clock["now"] += seconds + (0.001 if seconds > 0.0015 else 0.0)
+
+        with self._scripted_accept(module, steps, deadline=0.0405, horizon=0.005):
+            module._ACCEPT_OPEN_TIMEOUT_SECONDS = 0.0125
+            module._ACCEPT_RESTORE_WINDOW_SECONDS = 0.0125
+            module._ACCEPT_WARMUP_WINDOW_SECONDS = 0.01
+            module._ACCEPT_SWITCH_WINDOW_SECONDS = 0.01
+            module._ACCEPT_RESTORE_RESERVED_SECONDS = 0.03
+            with mock.patch.object(module._time, "monotonic", side_effect=monotonic):
+                with mock.patch.object(module._time, "sleep", side_effect=sleep):
+                    with self.assertRaises(module.DispatchError) as caught:
+                        module._accept(
+                            self.install, config, self.root / "backups", "standard"
+                        )
+        self.assertEqual(caught.exception.reason_code, "accept-restore-failed")
+
+    def test_accept_happy_path_never_waits_for_disconnect_horizon(self):
+        module = load_dispatch_module("luca_dispatch_no_horizon_happy")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "mode-b"}]},
+            {"writes": [{"mode": "public"}]},
+        ]
+        with self._scripted_accept(module, steps):
+            with mock.patch.object(module._time, "sleep", wraps=time.sleep) as slept:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        slept.assert_not_called()
+
+    def test_accept_restore_open_failure_consumes_attempt_and_rejects_retried(self):
+        module = load_dispatch_module("luca_dispatch_restore_open_retry")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "mode-b"}]},
+            {"error": module.DispatchError("accept request failed")},
+            {"writes": [{"mode": "public"}]},
+        ]
+        with self._scripted_accept(module, steps) as records:
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-restore-retried")
+        self.assertEqual(len(records), 4)
+        self.assertEqual(len({item["conversation"] for item in records}), 4)
+
+    def test_status_turn_key_shape_and_owned_fallback_are_fail_closed(self):
+        module = load_dispatch_module("luca_dispatch_turn_key_shape")
+        session_id = "12345678-1234-4234-8234-123456789abc"
+        for value in (3, "hostile\nbytes", "x" * 257):
+            with self.subTest(value=value):
+                self._write_accept_status("public", turn_key=value)
+                with self.assertRaises(module.DispatchError):
+                    module._status(self.install / "state/status.json")
+        self._write_accept_status("public", turn_key=session_id)
+        status = module._status(self.install / "state/status.json")
+        self.assertTrue(module._owned(status, session_id))
+        self.assertFalse(module._owned(status, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"))
+        self._write_accept_status("public", turn_key=None)
+        self.assertFalse(module._owned(module._status(self.install / "state/status.json"), session_id))
+
+    def test_status_read_is_bounded(self):
+        module = load_dispatch_module("luca_dispatch_status_bounded")
+        state = self.install / "state"
+        state.mkdir(exist_ok=True)
+        (state / "status.json").write_bytes(b"{" + b" " * module._STATUS_OUTPUT_LIMIT + b"}")
+        with self.assertRaises(module.DispatchError):
+            module._status(state / "status.json")
+
+    def test_accept_http_error_closes_without_reading_hostile_body(self):
+        module = load_dispatch_module("luca_dispatch_http_error_body")
+
+        class HostileBody:
+            def __init__(self):
+                self.read_calls = 0
+                self.closed = False
+
+            def read(self, *_arguments):
+                self.read_calls += 1
+                raise AssertionError("HTTP error body was read")
+
+            def close(self):
+                self.closed = True
+
+        body = HostileBody()
+        error = urllib.error.HTTPError(
+            "http://127.0.0.1:4321/v1/responses", 503, "hostile status", {}, body
+        )
+        opener = mock.MagicMock()
+        opener.open.side_effect = error
+        with mock.patch.object(module.urllib.request, "build_opener", return_value=opener):
+            with self.assertRaises(module.DispatchError):
+                module._open_accept_stream(
+                    "fixture-secret",
+                    4321,
+                    "fixed-conversation",
+                    "deployment warm-up",
+                    module._time.monotonic() + 1,
+                )
+        self.assertTrue(body.closed)
+        self.assertEqual(body.read_calls, 0)
+
+    def test_accept_invalid_session_header_closes_response_without_body_read(self):
+        module = load_dispatch_module("luca_dispatch_bad_session_close")
+        response = HeldAcceptResponse()
+        response.headers = mock.MagicMock()
+        response.headers.get_all.return_value = ["hostile-header-value"]
+        opener = mock.MagicMock()
+        opener.open.return_value = response
+        with mock.patch.object(module.urllib.request, "build_opener", return_value=opener):
+            with self.assertRaises(module.DispatchError):
+                module._open_accept_stream(
+                    "fixture-secret",
+                    4321,
+                    "fixed-conversation",
+                    "deployment warm-up",
+                    module._time.monotonic() + 1,
+                )
+        self.assertTrue(response.closed)
+        self.assertEqual(response.close_calls, 1)
+        self.assertEqual(response.read_calls, 0)
+
+    def test_accept_http_error_emits_only_literal_reason_line(self):
+        module = load_dispatch_module("luca_dispatch_http_error_literal")
+        self._write_accept_status("public")
+        self._write_accept_config()
+        body = HeldAcceptResponse()
+        error = urllib.error.HTTPError(
+            "http://127.0.0.1:1/v1/responses",
+            503,
+            "private hostile status",
+            {"X-Private": "private hostile header"},
+            body,
+        )
+        opener = mock.MagicMock()
+        opener.open.side_effect = error
+        stderr = io.StringIO()
+        stdout_bytes = io.BytesIO()
+        stdout = io.TextIOWrapper(stdout_bytes, encoding="utf-8")
+        environment = {
+            "SSH_ORIGINAL_COMMAND": "accept",
+            "PGL_LUCA_DISPATCH_TESTING": "1",
+            "PGL_LUCA_DISPATCH_TEST_ROOT": str(self.root),
+        }
+        with mock.patch.object(module.urllib.request, "build_opener", return_value=opener):
+            with mock.patch.object(module.sys, "argv", [str(DISPATCH), "deploy"]):
+                with mock.patch.object(module.os, "environ", environment):
+                    with mock.patch.object(module.sys, "stderr", stderr):
+                        with mock.patch.object(module.sys, "stdout", stdout):
+                            self.assertEqual(module.main(), 1)
+                            stdout.flush()
+        self.assertEqual(stderr.getvalue(), reason_line("accept-warmup-failed"))
+        self.assertEqual(stdout_bytes.getvalue(), b"")
+        self.assertTrue(body.closed)
+        self.assertEqual(body.read_calls, 0)
+
+    def test_accept_wrong_mode_and_metadata_reports_switch_not_applied(self):
+        module = load_dispatch_module("luca_dispatch_accept_not_applied")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+
+        def send_turn(_token, _port, _conversation, utterance):
+            if utterance == "/persona public":
+                self._write_accept_status("public")
+            return "11111111-1111-1111-1111-111111111111"
+
+        with mock.patch.object(module, "_ACCEPT_POLL_INTERVAL_SECONDS", 0):
+            with mock.patch.object(module, "_ACCEPT_SWITCH_WINDOW_SECONDS", 0):
+                with self._patch_accept_open(module, send_turn):
+                    with self.assertRaises(module.DispatchError) as caught:
+                        module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-switch-not-applied")
+
+    def test_accept_right_mode_wrong_metadata_reports_mismatch(self):
+        module = load_dispatch_module("luca_dispatch_accept_metadata_mismatch")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+
+        def send_turn(_token, _port, _conversation, utterance):
+            if utterance == "/persona mode-b":
+                self._write_accept_status(
+                    "mode-b",
+                    block_bytes=1,
+                    block_sha256="0" * 64,
+                )
+            elif utterance == "/persona public":
+                self._write_accept_status("public")
+            return "11111111-1111-1111-1111-111111111111"
+
+        with mock.patch.object(module, "_ACCEPT_POLL_INTERVAL_SECONDS", 0):
+            with mock.patch.object(module, "_ACCEPT_SWITCH_WINDOW_SECONDS", 0):
+                with self._patch_accept_open(module, send_turn):
+                    with self.assertRaises(module.DispatchError) as caught:
+                        module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(
+            caught.exception.reason_code, "accept-switch-metadata-mismatch"
+        )
+
+    def test_accept_switch_non_timeout_failure_reports_request_failed(self):
+        module = load_dispatch_module("luca_dispatch_accept_request_failed")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+
+        def send_turn(_token, _port, _conversation, utterance):
+            if utterance == "/persona mode-b":
+                raise module.DispatchError("accept request failed")
+            if utterance == "/persona public":
+                self._write_accept_status("public")
+            return "11111111-1111-1111-1111-111111111111"
+
+        with self._patch_accept_open(module, send_turn):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-switch-request-failed")
+
+    def test_accept_switch_timeout_reports_request_timeout(self):
+        module = load_dispatch_module("luca_dispatch_accept_request_timeout")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+
+        def send_turn(_token, _port, _conversation, utterance):
+            if utterance == "/persona mode-b":
+                raise module._AcceptRequestTimeout("accept request failed")
+            if utterance == "/persona public":
+                self._write_accept_status("public")
+            return "11111111-1111-1111-1111-111111111111"
+
+        with self._patch_accept_open(module, send_turn):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-switch-request-timeout")
+
+    def test_accept_warmup_timeout_rejects_before_switch_turn(self):
+        module = load_dispatch_module("luca_dispatch_accept_warmup_timeout")
+        self._write_accept_status("public")
+        self._write_accept_config()
+        stderr = io.StringIO()
+        stdout_bytes = io.BytesIO()
+        stdout = io.TextIOWrapper(stdout_bytes, encoding="utf-8")
+        environment = {
+            "SSH_ORIGINAL_COMMAND": "accept",
+            "PGL_LUCA_DISPATCH_TESTING": "1",
+            "PGL_LUCA_DISPATCH_TEST_ROOT": str(self.root),
+        }
+        with self._scripted_accept(
+            module, [{"writes": [{"mode": "public", "owner": "foreign"}]}]
+        ) as records:
+            with mock.patch.object(module.sys, "argv", [str(DISPATCH), "deploy"]):
+                with mock.patch.object(module.os, "environ", environment):
+                    with mock.patch.object(module.sys, "stderr", stderr):
+                        with mock.patch.object(module.sys, "stdout", stdout):
+                            returncode = module.main()
+                            stdout.flush()
+        self.assertEqual(returncode, 1)
+        self.assertEqual(stderr.getvalue(), reason_line("accept-warmup-timeout"))
+        self.assertEqual(stdout_bytes.getvalue(), b"")
+        self.assertEqual([item["utterance"] for item in records], ["deployment warm-up"])
+
+    def test_accept_warmup_failure_rejects_before_switch_turn(self):
+        module = load_dispatch_module("luca_dispatch_accept_warmup_failed")
+        self._write_accept_status("public")
+        self._write_accept_config()
+        calls = []
+
+        def send_turn(_token, _port, _conversation, utterance):
+            calls.append(utterance)
+            raise module.DispatchError("accept request failed")
+
+        stderr = io.StringIO()
+        stdout_bytes = io.BytesIO()
+        stdout = io.TextIOWrapper(stdout_bytes, encoding="utf-8")
+        environment = {
+            "SSH_ORIGINAL_COMMAND": "accept",
+            "PGL_LUCA_DISPATCH_TESTING": "1",
+            "PGL_LUCA_DISPATCH_TEST_ROOT": str(self.root),
+        }
+        with self._patch_accept_open(module, send_turn):
+            with mock.patch.object(module.sys, "argv", [str(DISPATCH), "deploy"]):
+                with mock.patch.object(module.os, "environ", environment):
+                    with mock.patch.object(module.sys, "stderr", stderr):
+                        with mock.patch.object(module.sys, "stdout", stdout):
+                            returncode = module.main()
+                            stdout.flush()
+        self.assertEqual(returncode, 1)
+        self.assertEqual(stderr.getvalue(), reason_line("accept-warmup-failed"))
+        self.assertEqual(stdout_bytes.getvalue(), b"")
+        self.assertEqual(calls, ["deployment warm-up"])
+
+    def test_accept_timeout_budget_stays_below_ssh_cap(self):
+        module = load_dispatch_module("luca_dispatch_accept_timeout_budget")
+        from growthlane import deploy
+
+        attempts = module._ACCEPT_RESTORE_RETRIES
+        happy = (
+            (2 + attempts) * module._ACCEPT_OPEN_TIMEOUT_SECONDS
+            + module._ACCEPT_WARMUP_WINDOW_SECONDS
+            + module._ACCEPT_SWITCH_WINDOW_SECONDS
+            + attempts * module._ACCEPT_RESTORE_WINDOW_SECONDS
+        )
+        self.assertLessEqual(happy, module._ACCEPT_DEADLINE_SECONDS)
+        self.assertLessEqual(
+            happy + module._ACCEPT_DISCONNECT_HORIZON_SECONDS,
+            module._ACCEPT_DEADLINE_SECONDS,
+        )
+        self.assertLessEqual(
+            module._ACCEPT_DEADLINE_SECONDS + 25,
+            deploy._ACCEPT_COMMAND_TIMEOUT_SECONDS,
+        )
+        self.assertGreaterEqual(
+            module._ACCEPT_RESTORE_RESERVED_SECONDS,
+            max(
+                attempts
+                * (
+                    module._ACCEPT_OPEN_TIMEOUT_SECONDS
+                    + module._ACCEPT_RESTORE_WINDOW_SECONDS
+                ),
+                module._ACCEPT_OPEN_TIMEOUT_SECONDS
+                + module._ACCEPT_RESTORE_WINDOW_SECONDS
+                + module._ACCEPT_DISCONNECT_HORIZON_SECONDS,
+            ),
+        )
+        self.assertGreaterEqual(
+            module._ACCEPT_DISCONNECT_HORIZON_SECONDS, 2 * 30 + 10
+        )
+        self.assertLessEqual(
+            2 * module._ACCEPT_OPEN_TIMEOUT_SECONDS
+            + module._ACCEPT_WARMUP_WINDOW_SECONDS
+            + module._ACCEPT_SWITCH_WINDOW_SECONDS
+            + module._ACCEPT_DISCONNECT_HORIZON_SECONDS,
+            module._ACCEPT_DEADLINE_SECONDS,
+        )
+
+    def test_client_raises_only_accept_invocation_cap(self):
+        from growthlane import deploy
+
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(deploy.subprocess, "run", return_value=completed) as run:
+            deploy._run_command(
+                ("ssh", "-i", "/fixed/key", deploy.DEPLOY_TARGET, "accept"), self.root
+            )
+            deploy._run_command(
+                (
+                    "ssh",
+                    "-i",
+                    "/fixed/key",
+                    deploy.DEPLOY_TARGET,
+                    "accept",
+                    "deletion",
+                ),
+                self.root,
+            )
+            deploy._run_command(
+                (
+                    "ssh",
+                    "-i",
+                    "/fixed/key",
+                    deploy.DEPLOY_TARGET,
+                    "deploy",
+                    "restart",
+                ),
+                self.root,
+            )
+        self.assertEqual(
+            [call.kwargs["timeout"] for call in run.call_args_list],
+            [
+                deploy._ACCEPT_COMMAND_TIMEOUT_SECONDS,
+                deploy._ACCEPT_COMMAND_TIMEOUT_SECONDS,
+                deploy._COMMAND_TIMEOUT_SECONDS,
+            ],
+        )
+        self.assertEqual(deploy._ACCEPT_COMMAND_TIMEOUT_SECONDS, 380)
+        self.assertEqual(deploy._COMMAND_TIMEOUT_SECONDS, 300)
+
+    def test_open_accept_stream_clamps_timeout_and_closes_post_deadline_response(self):
+        module = load_dispatch_module("luca_dispatch_open_deadline")
+        response = HeldAcceptResponse()
+        response.headers = mock.MagicMock()
+        response.headers.get_all.return_value = [
+            "12345678-1234-4234-8234-123456789abc"
+        ]
+        opener = mock.MagicMock()
+        opener.open.return_value = response
+        ticks = iter((10.0, 15.0))
+        with mock.patch.object(module._time, "monotonic", side_effect=lambda: next(ticks)):
+            with mock.patch.object(module.urllib.request, "build_opener", return_value=opener):
+                with self.assertRaises(module._AcceptDeadlineExpired):
+                    module._open_accept_stream(
+                        "fixture-secret",
+                        4321,
+                        "fixed-conversation",
+                        "deployment warm-up",
+                        14.0,
+                    )
+        self.assertEqual(opener.open.call_args.kwargs["timeout"], 4.0)
+        self.assertTrue(response.closed)
+        self.assertEqual(response.read_calls, 0)
+
+    def test_accept_zero_deadline_skips_first_open_and_all_later_opens(self):
+        module = load_dispatch_module("luca_dispatch_skip_open_deadline")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        with mock.patch.object(module, "_ACCEPT_DEADLINE_SECONDS", 0):
+            with mock.patch.object(module.urllib.request, "build_opener") as build:
+                with self.assertRaises(module.DispatchError) as caught:
+                    module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-warmup-timeout")
+        build.assert_not_called()
+
+    def test_oracle_poll_sleep_is_clamped_exactly_to_deadline_boundary(self):
+        module = load_dispatch_module("luca_dispatch_poll_boundary")
+        self._write_accept_status("public", turn_key=None)
+        clock = {"now": 0.0}
+        sleeps = []
+
+        def monotonic():
+            return clock["now"]
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        with mock.patch.object(module._time, "monotonic", side_effect=monotonic):
+            with mock.patch.object(module._time, "sleep", side_effect=sleep):
+                with mock.patch.object(module, "_ACCEPT_POLL_INTERVAL_SECONDS", 3):
+                    with self.assertRaises(module._AcceptOracleTimeout):
+                        module._await_owned_status(
+                            self.install / "state/status.json",
+                            "12345678-1234-4234-8234-123456789abc",
+                            5.0,
+                        )
+        self.assertEqual(sleeps, [3, 2.0])
+        self.assertEqual(clock["now"], 5.0)
+
+    def test_accept_switch_failure_after_runtime_write_still_restores(self):
+        module = load_dispatch_module("luca_dispatch_accept_presend_latch")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        calls = []
+
+        def send_turn(_token, _port, _conversation, utterance):
+            calls.append(utterance)
+            if utterance == "/persona mode-b":
+                self._write_accept_status("mode-b")
+                raise module.DispatchError("accept request failed")
+            if utterance == "/persona public":
+                self._write_accept_status("public")
+            return "11111111-1111-1111-1111-111111111111"
+
+        with self._patch_accept_open(module, send_turn):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-switch-request-failed")
+        self.assertEqual(
+            calls,
+            ["deployment warm-up", "/persona mode-b", "/persona public"],
+        )
+        self.assertEqual(
+            json.loads((self.install / "state/status.json").read_text(encoding="utf-8"))[
+                "mode"
+            ],
+            "public",
+        )
+
+    def test_accept_nonconvergent_restore_overrides_primary_switch_code(self):
+        module = load_dispatch_module("luca_dispatch_accept_restore_precedence")
+        self._write_accept_status("public")
+        self._write_accept_config()
+        calls = []
+
+        def send_turn(_token, _port, _conversation, utterance):
+            calls.append(utterance)
+            if utterance == "/persona mode-b":
+                self._write_accept_status("mode-b")
+                raise module.DispatchError("accept request failed")
+            if utterance == "/persona public":
+                raise module.DispatchError("accept request failed")
+            return "11111111-1111-1111-1111-111111111111"
+
+        stderr = io.StringIO()
+        environment = {
+            "SSH_ORIGINAL_COMMAND": "accept",
+            "PGL_LUCA_DISPATCH_TESTING": "1",
+            "PGL_LUCA_DISPATCH_TEST_ROOT": str(self.root),
+        }
+        with self._patch_accept_open(module, send_turn):
+            with mock.patch.object(module.sys, "argv", [str(DISPATCH), "deploy"]):
+                with mock.patch.object(module.os, "environ", environment):
+                    with mock.patch.object(module.sys, "stderr", stderr):
+                        self.assertEqual(module.main(), 1)
+        self.assertEqual(stderr.getvalue(), reason_line("accept-restore-failed"))
+        self.assertEqual(calls.count("/persona public"), 2)
+
+    def test_accept_primary_switch_code_survives_restore_retry(self):
+        module = load_dispatch_module("luca_dispatch_accept_primary_survives")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        restore_attempts = 0
+
+        def send_turn(_token, _port, _conversation, utterance):
+            nonlocal restore_attempts
+            if utterance == "/persona mode-b":
+                raise module.DispatchError("accept request failed")
+            if utterance == "/persona public":
+                restore_attempts += 1
+                if restore_attempts == 1:
+                    raise module.DispatchError("accept request failed")
+                self._write_accept_status("public")
+            return "11111111-1111-1111-1111-111111111111"
+
+        with self._patch_accept_open(module, send_turn):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-switch-request-failed")
+        self.assertEqual(restore_attempts, 2)
+
+    def test_accept_unreadable_switch_status_reports_switch_failed(self):
+        module = load_dispatch_module("luca_dispatch_accept_status_unreadable")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+
+        def send_turn(_token, _port, _conversation, utterance):
+            if utterance == "/persona mode-b":
+                (self.install / "state/status.json").unlink()
+            elif utterance == "/persona public":
+                self._write_accept_status("public")
+            return "11111111-1111-1111-1111-111111111111"
+
+        with self._patch_accept_open(module, send_turn):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-switch-failed")
 
     def test_accept_returns_every_distinct_generated_session_uuid(self):
         module = load_dispatch_module("luca_dispatch_multi_session")
@@ -1702,7 +2932,7 @@ raise SystemExit(0 if not issues else 2)
                 )
             return next(session_ids)
 
-        with mock.patch.object(module, "_send_accept_turn", send_turn):
+        with self._patch_accept_open(module, send_turn):
             output = module._accept(
                 self.install,
                 config,
@@ -1719,6 +2949,7 @@ raise SystemExit(0 if not issues else 2)
         )
 
     def test_accept_deletion_rejects_render_file_set_increase(self):
+        module = load_dispatch_module("luca_dispatch_deletion_increase")
         overlay = self.pack / "catalogs/overlay"
         overlay.mkdir(parents=True)
         (overlay / "adopted.txt").write_text("old\n", encoding="utf-8")
@@ -1726,23 +2957,19 @@ raise SystemExit(0 if not issues else 2)
         rebuilt = self.run_dispatch(f"deploy promote {expected}", role="deploy")
         self.assertEqual(rebuilt.returncode, 0, rebuilt.stderr)
         self.assertEqual(self.run_dispatch("deploy backup", role="deploy").returncode, 0)
-        try:
-            server, thread, requests, _session_id = self._run_accept_server()
-        except PermissionError:
-            self.skipTest("loopback bind unavailable in this sandbox")
-        try:
-            (overlay / "candidates.txt").write_text("new\n", encoding="utf-8")
-            result = self.run_dispatch("accept deletion", role="deploy")
-        finally:
-            server.shutdown()
-            thread.join(timeout=5)
-            server.server_close()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr, ERROR_LINE)
-        self.assertEqual(requests, [])
+        (overlay / "candidates.txt").write_text("new\n", encoding="utf-8")
+        with self._scripted_accept(module, []) as records:
+            with self.assertRaises(module.DispatchError):
+                module._accept(
+                    self.install,
+                    self.root / "missing-config",
+                    self.root / "home/admin/.hermes/backups",
+                    "deletion",
+                )
+        self.assertEqual(records, [])
 
     def test_accept_deletion_allows_shrunk_render_file_set(self):
+        module = load_dispatch_module("luca_dispatch_deletion_shrink")
         overlay = self.pack / "catalogs/overlay"
         overlay.mkdir(parents=True)
         (overlay / "old.txt").write_text("old\n", encoding="utf-8")
@@ -1752,22 +2979,22 @@ raise SystemExit(0 if not issues else 2)
         self.assertEqual(rebuilt.returncode, 0, rebuilt.stderr)
         self.assertEqual(self.run_dispatch("deploy backup", role="deploy").returncode, 0)
         (overlay / "drop.txt").unlink()
-        try:
-            server, thread, requests, session_id = self._run_accept_server()
-        except PermissionError:
-            self.skipTest("loopback bind unavailable in this sandbox")
-        try:
-            result = self.run_dispatch("accept deletion", role="deploy")
-        finally:
-            server.shutdown()
-            thread.join(timeout=5)
-            server.server_close()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), [session_id])
-        self.assertEqual(
-            [entry[2]["input"] for entry in requests],
-            ["deployment warm-up", "/persona mode-b", "/persona public"],
-        )
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "mode-b"}]},
+            {"writes": [{"mode": "public"}]},
+        ]
+        with self._scripted_accept(module, steps) as records:
+            output = module._accept(
+                self.install,
+                config,
+                self.root / "home/admin/.hermes/backups",
+                "deletion",
+            )
+        self.assertEqual(len(json.loads(output)), 3)
+        self.assertEqual(len(records), 3)
 
     def test_assert_deletion_subset_rejects_increase_and_allows_shrink_or_unchanged(self):
         module = load_dispatch_module("luca_dispatch_deletion_subset")
@@ -1831,7 +3058,7 @@ raise SystemExit(0 if not issues else 2)
                 return "22222222-2222-2222-2222-222222222222"
             raise urllib.error.URLError("loopback unavailable")
 
-        with mock.patch.object(module, "_send_accept_turn", side_effect=send_turn):
+        with self._patch_accept_open(module, send_turn):
             with self.assertRaises(module.DispatchError) as caught:
                 module._accept(
                     self.install,
@@ -1840,6 +3067,7 @@ raise SystemExit(0 if not issues else 2)
                     "standard",
                 )
         self.assertIn("runtime mode unknown", str(caught.exception))
+        self.assertEqual(caught.exception.reason_code, "accept-restore-failed")
         self.assertEqual(
             calls,
             [
@@ -1911,7 +3139,7 @@ raise SystemExit(0 if not issues else 2)
                 return "33333333-3333-3333-3333-333333333333"
             raise AssertionError(f"unexpected utterance: {utterance}")
 
-        with mock.patch.object(module, "_send_accept_turn", side_effect=send_turn):
+        with self._patch_accept_open(module, send_turn):
             with self.assertRaises(module.DispatchError) as caught:
                 module._accept(
                     self.install,
@@ -1920,6 +3148,7 @@ raise SystemExit(0 if not issues else 2)
                     "standard",
                 )
         self.assertEqual(str(caught.exception), "acceptance failed")
+        self.assertEqual(caught.exception.reason_code, "accept-restore-retried")
         self.assertEqual(
             calls,
             [
@@ -1931,6 +3160,95 @@ raise SystemExit(0 if not issues else 2)
         )
         status = json.loads((state / "status.json").read_text(encoding="utf-8"))
         self.assertEqual(status["mode"], "public")
+
+    def test_dispatch_error_rejects_unknown_reason_code_at_construction(self):
+        module = load_dispatch_module("luca_dispatch_reason_validation")
+        with self.assertRaises(ValueError):
+            module.DispatchError(reason_code="accept-typo-not-in-vocabulary")
+
+    def test_main_ignores_reason_attributes_on_foreign_exceptions(self):
+        module = load_dispatch_module("luca_dispatch_foreign_reason")
+
+        class ForeignError(Exception):
+            reason = "accept-switch-not-applied"
+            reason_code = "accept-switch-not-applied"
+
+        stderr = io.StringIO()
+        with mock.patch.object(module, "_parse_request", side_effect=ForeignError()):
+            with mock.patch.object(module.sys, "stderr", stderr):
+                self.assertEqual(module.main(), 1)
+        self.assertEqual(stderr.getvalue(), ERROR_LINE)
+
+    def test_main_rejects_str_subclass_reason_code_at_emission(self):
+        module = load_dispatch_module("luca_dispatch_str_subclass_reason")
+
+        class ReasonCode(str):
+            pass
+
+        exception = module.DispatchError(
+            reason_code=ReasonCode("accept-switch-not-applied")
+        )
+        stderr = io.StringIO()
+        with mock.patch.object(module, "_parse_request", side_effect=exception):
+            with mock.patch.object(module.sys, "stderr", stderr):
+                self.assertEqual(module.main(), 1)
+        self.assertEqual(stderr.getvalue(), ERROR_LINE)
+
+    def test_every_emitted_failure_is_one_literal_line_and_stdout_is_empty(self):
+        module = load_dispatch_module("luca_dispatch_literal_emission")
+        allowed_lines = {ERROR_LINE, *module._REASON_LINES.values()}
+
+        class ForeignError(Exception):
+            reason_code = "restart-command-failed"
+
+        failures = [ForeignError(), module.DispatchError()]
+        failures.extend(
+            module.DispatchError(reason_code=code) for code in module._REASON_CODES
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__, reason=getattr(failure, "reason_code", None)):
+                stderr = io.StringIO()
+                stdout_bytes = io.BytesIO()
+                stdout = io.TextIOWrapper(stdout_bytes, encoding="utf-8")
+                with mock.patch.object(module, "_parse_request", side_effect=failure):
+                    with mock.patch.object(module.sys, "stderr", stderr):
+                        with mock.patch.object(module.sys, "stdout", stdout):
+                            self.assertEqual(module.main(), 1)
+                            stdout.flush()
+                self.assertIn(stderr.getvalue(), allowed_lines)
+                self.assertEqual(stderr.getvalue().count("\n"), 1)
+                self.assertEqual(stdout_bytes.getvalue(), b"")
+
+    def test_reason_vocabulary_has_closed_safe_shape(self):
+        module = load_dispatch_module("luca_dispatch_reason_vocabulary")
+        self.assertEqual(len(module._REASON_CODES), 13)
+        self.assertEqual(len(module._REASON_LINES), 13)
+        self.assertEqual(
+            module._REASON_CODES,
+            {
+                "accept-warmup-timeout",
+                "accept-warmup-failed",
+                "accept-switch-request-failed",
+                "accept-switch-request-timeout",
+                "accept-switch-not-applied",
+                "accept-switch-metadata-mismatch",
+                "accept-switch-failed",
+                "accept-restore-failed",
+                "accept-restore-retried",
+                "restart-command-failed",
+                "restart-command-timeout",
+                "restart-units-not-active",
+                "restart-verification-failed",
+            },
+        )
+        self.assertEqual(module._REASON_LINES.keys(), module._REASON_CODES)
+        for code in module._REASON_CODES:
+            self.assertIsNotNone(re.fullmatch(r"[a-z][a-z0-9-]{1,40}", code))
+            self.assertTrue(code.isascii())
+        for line in module._REASON_LINES.values():
+            self.assertTrue(line.endswith("\n"))
+            self.assertEqual(line.count("\n"), 1)
+            self.assertNotIn("\r", line)
 
     def test_run_transfer_receiver_times_out_after_stderr_closes(self):
         self.rsync_path.write_text(

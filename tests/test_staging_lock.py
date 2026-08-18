@@ -113,8 +113,9 @@ class StagingLockFixture(unittest.TestCase):
         ) -> subprocess.CompletedProcess[str]:
             if tuple(command[:3]) == ("git", "pull", "--ff-only"):
                 return _completed(command)
+            install_root = Path(command[command.index("--dir") + 1])
             if "build" in command:
-                build = self.staging / "build"
+                build = install_root / "build"
                 build.mkdir(parents=True, exist_ok=True)
                 (build / "manifest.json").write_text(
                     json.dumps({"content_hash": HASH_A}) + "\n",
@@ -142,7 +143,7 @@ class StagingLockFixture(unittest.TestCase):
                 snapshot.append((relative, path.read_bytes()))
         return snapshot
 
-    def _install_fake_persona(
+    def _install_fake_node(
         self,
         *,
         build_exit: int = 0,
@@ -152,7 +153,7 @@ class StagingLockFixture(unittest.TestCase):
     ) -> dict[str, str]:
         fake_bin = self.root / "bin"
         fake_bin.mkdir(exist_ok=True)
-        persona = fake_bin / "persona"
+        node = fake_bin / "node"
         manifest_payload = (
             manifest_content
             if manifest_content is not None
@@ -163,22 +164,22 @@ class StagingLockFixture(unittest.TestCase):
             if doctor_stdout is not None
             else json.dumps({"ok": True, "issues": []})
         )
-        persona.write_text(
+        node.write_text(
             "#!/usr/bin/env python3\n"
             "import os, pathlib, sys\n"
-            "cwd = pathlib.Path.cwd()\n"
+            "root = pathlib.Path(sys.argv[sys.argv.index('--dir') + 1])\n"
             "lock = pathlib.Path(os.environ['EXPECTED_STAGING_LOCK'])\n"
-            "command = sys.argv[1]\n"
-            "(cwd / 'build').mkdir(parents=True, exist_ok=True)\n"
-            "(cwd / 'build' / f'{command}-lock.txt').write_text('1' if lock.is_dir() else '0', encoding='utf-8')\n"
+            "command = sys.argv[2]\n"
+            "(root / 'build').mkdir(parents=True, exist_ok=True)\n"
+            "(root / 'build' / f'{command}-lock.txt').write_text('1' if lock.is_dir() else '0', encoding='utf-8')\n"
             "if command == 'build':\n"
-            f"    (cwd / 'build' / 'manifest.json').write_text({manifest_payload!r}, encoding='utf-8')\n"
+            f"    (root / 'build' / 'manifest.json').write_text({manifest_payload!r}, encoding='utf-8')\n"
             f"    sys.exit({build_exit})\n"
             f"sys.stdout.write({doctor_payload!r})\n"
             f"sys.exit({doctor_exit})\n",
             encoding="utf-8",
         )
-        persona.chmod(0o700)
+        node.chmod(0o700)
         return {
             "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
             "EXPECTED_STAGING_LOCK": str(staging_lock_path(self.staging, "luca")),
@@ -192,7 +193,7 @@ class StagingLockFixture(unittest.TestCase):
             with self.assertRaisesRegex(ApplyError, expected_error):
                 _build(self.profile, self.clone, {}, self.config)
         self.assertFalse(lock_path.exists())
-        with mock.patch.dict(os.environ, self._install_fake_persona(), clear=False):
+        with mock.patch.dict(os.environ, self._install_fake_node(), clear=False):
             self.assertEqual(_build(self.profile, self.clone, {}, self.config), HASH_A)
 
 
@@ -469,7 +470,7 @@ class StagingLockTests(StagingLockFixture):
                 regenerate_staging(self.config, command_runner=self.runner())
 
     def test_applier_holds_lock_through_manifest_read_build_and_doctor(self) -> None:
-        env = self._install_fake_persona()
+        env = self._install_fake_node()
         manifest_path = self.staging / "build" / "manifest.json"
         expected_lock = staging_lock_path(self.staging, "luca")
         original_read_text = Path.read_text
@@ -497,7 +498,7 @@ class StagingLockTests(StagingLockFixture):
         )
 
     def test_applier_release_failure_is_surfaced_after_success(self) -> None:
-        with mock.patch.dict(os.environ, self._install_fake_persona(), clear=False):
+        with mock.patch.dict(os.environ, self._install_fake_node(), clear=False):
             with mock.patch("applier.apply.release_lock", return_value=False):
                 with self.assertRaisesRegex(
                     ApplyError, "luca staging lock directory could not be removed"
@@ -506,7 +507,7 @@ class StagingLockTests(StagingLockFixture):
 
     def test_applier_release_failure_chains_original_failure(self) -> None:
         with mock.patch.dict(
-            os.environ, self._install_fake_persona(build_exit=2), clear=False
+            os.environ, self._install_fake_node(build_exit=2), clear=False
         ):
             with mock.patch("applier.apply.release_lock", return_value=False):
                 with self.assertRaisesRegex(
@@ -530,19 +531,19 @@ class StagingLockTests(StagingLockFixture):
 
     def test_applier_build_failure_releases_lock_and_next_build_reacquires(self) -> None:
         self._assert_applier_failure_releases_lock(
-            self._install_fake_persona(build_exit=2),
+            self._install_fake_node(build_exit=2),
             "persona build exited 2",
         )
 
     def test_applier_manifest_failure_releases_lock_and_next_build_reacquires(self) -> None:
         self._assert_applier_failure_releases_lock(
-            self._install_fake_persona(manifest_content=json.dumps({"content_hash": "bad"}) + "\n"),
+            self._install_fake_node(manifest_content=json.dumps({"content_hash": "bad"}) + "\n"),
             "persona build manifest omitted a valid content_hash",
         )
 
     def test_applier_doctor_failure_releases_lock_and_next_build_reacquires(self) -> None:
         self._assert_applier_failure_releases_lock(
-            self._install_fake_persona(
+            self._install_fake_node(
                 doctor_stdout=json.dumps({"ok": True, "issues": ["x"]}),
             ),
             "persona doctor report is not clean",

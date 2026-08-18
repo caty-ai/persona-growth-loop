@@ -23,6 +23,7 @@ from growthlane.locking import (
     staging_contention_detail,
     staging_lock_path,
 )
+from growthlane.persona_cli import PersonaCliError, persona_argv
 
 from .common import MirrorError, atomic_write, ensure_private_dir, read_bytes_nofollow
 
@@ -115,6 +116,13 @@ def _expected_placeholders(config: Mapping[str, object]) -> dict[str, str]:
         "user": owner_display,
         "owner-name": owner_display,
     }
+
+
+def _persona_argv(clone: Path, command: str, staging_root: Path) -> tuple[str, ...]:
+    try:
+        return persona_argv(clone, command, staging_root)
+    except PersonaCliError as exc:
+        raise MirrorError(f"Luca staging {command} cannot launch: {exc}") from exc
 
 
 def _load_install(
@@ -264,9 +272,8 @@ def regenerate_staging(
                 raise MirrorError(f"Luca staging build has unsafe shape: {build}")
             shutil.rmtree(build)
 
-        persona = clone / "packages" / "core" / "bin" / "persona"
         build_result = _completed_json(
-            command_runner(("node", str(persona), "build", "--dir", str(staging_root)), clone),
+            command_runner(_persona_argv(clone, "build", staging_root), clone),
             "Luca staging build",
         )
         if build_result.get("ok") is not True:
@@ -277,7 +284,7 @@ def regenerate_staging(
             raise MirrorError("Luca staging build omitted a valid content_hash")
 
         doctor_result = _completed_json(
-            command_runner(("node", str(persona), "doctor", "--dir", str(staging_root)), clone),
+            command_runner(_persona_argv(clone, "doctor", staging_root), clone),
             "Luca staging doctor",
         )
         if doctor_result.get("ok") is not True:

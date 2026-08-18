@@ -1775,6 +1775,9 @@ class GrowthE2ETests(unittest.TestCase):
         overlay = self.root / "luca-pack"
         staging = self.root / "luca-staging"
         (overlay / "persona-engine" / "catalogs" / "overlay").mkdir(parents=True)
+        persona = overlay / "packages" / "core" / "bin" / "persona"
+        persona.parent.mkdir(parents=True)
+        persona.write_text("fixture\n", encoding="utf-8")
         (overlay / "growth").mkdir()
         (overlay / "tests" / "luca-pack").mkdir(parents=True)
         staging.mkdir()
@@ -1897,26 +1900,26 @@ class GrowthE2ETests(unittest.TestCase):
         fake_bin = self.root / "bin"
         fake_bin.mkdir()
         persona_calls = self.root / "persona-calls.txt"
-        persona = fake_bin / "persona"
-        persona.write_text(
+        node = fake_bin / "node"
+        node.write_text(
             "#!/usr/bin/env python3\n"
             "import hashlib, json, os, sys\n"
             "from pathlib import Path\n"
-            "root = Path.cwd()\n"
+            "root = Path(sys.argv[sys.argv.index('--dir') + 1])\n"
             "with Path(os.environ['PGL_TEST_CALLS']).open('a', encoding='utf-8') as stream:\n"
-            "    stream.write(sys.argv[1] + '\\n')\n"
-            "if sys.argv[1] == 'build':\n"
+            "    stream.write(sys.argv[2] + '\\n')\n"
+            "if sys.argv[2] == 'build':\n"
             "    value = hashlib.sha256((root / 'pack/catalogs/overlay/candidates.txt').read_bytes()).hexdigest()\n"
             "    (root / 'build').mkdir()\n"
             "    (root / 'build/manifest.json').write_text(json.dumps({'content_hash': value}) + '\\n', encoding='utf-8')\n"
             "    print(json.dumps({'ok': True, 'manifest': {'content_hash': value}}))\n"
-            "elif sys.argv[1] == 'doctor':\n"
+            "elif sys.argv[2] == 'doctor':\n"
             "    print(json.dumps({'ok': True, 'issues': []}))\n"
             "else:\n"
             "    raise SystemExit(2)\n",
             encoding="utf-8",
         )
-        persona.chmod(0o755)
+        node.chmod(0o755)
         transport_calls = self.root / "transport-calls.txt"
         ssh = fake_bin / "ssh"
         ssh.write_text(

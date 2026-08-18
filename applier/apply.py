@@ -30,6 +30,7 @@ from growthlane.locking import (
     staging_contention_detail,
 )
 from growthlane.notify import Digest, send_soul_alert
+from growthlane.persona_cli import PersonaCliError, persona_argv
 from growthlane.render import ADOPTED_TEMPLATE, CANDIDATES_TEMPLATE, render_files
 from growthlane.soul import SoulError, verify_manifest
 from growthlane.ucd_runtime import runtime_status
@@ -470,18 +471,22 @@ def _prepare_engine_staging(
         shutil.rmtree(build)
 
 
-def _run_persona(command: str, cwd: Path) -> subprocess.CompletedProcess[bytes]:
+def _run_persona(
+    command: str,
+    clone: Path,
+    install_root: Path,
+) -> subprocess.CompletedProcess[bytes]:
     try:
         completed = subprocess.run(
-            ["persona", command],
-            cwd=cwd,
+            persona_argv(clone, command, install_root),
+            cwd=install_root,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=120,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (PersonaCliError, OSError, subprocess.TimeoutExpired) as exc:
         raise ApplyError(f"persona {command} failed: {exc}") from exc
     if completed.returncode != 0:
         raw_detail = completed.stderr or completed.stdout
@@ -522,7 +527,7 @@ def _build(
     try:
         _validate_engine_staging(profile, home, staging_root)
         _prepare_engine_staging(home, staging_root)
-        _run_persona("build", staging_root)
+        _run_persona("build", home, staging_root)
         _regular_directory(staging_root / "build", "engine staging build directory")
         try:
             manifest = json.loads(
@@ -536,7 +541,7 @@ def _build(
             or re.fullmatch(r"[0-9a-f]{64}", content_hash) is None
         ):
             raise ApplyError("persona build manifest omitted a valid content_hash")
-        doctor = _run_persona("doctor", staging_root)
+        doctor = _run_persona("doctor", home, staging_root)
         try:
             report = json.loads(doctor.stdout.decode("utf-8"))
         except (UnicodeError, json.JSONDecodeError) as exc:

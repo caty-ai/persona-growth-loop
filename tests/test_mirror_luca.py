@@ -21,7 +21,7 @@ from growthlane.locking import staging_lock_path
 from growthlane.notify import Digest
 from mirror.common import MirrorError, injected_bytes, load_configs
 from mirror.staging import StagingBuild, regenerate_staging
-from mirror.weekly import fetch_luca_production_digest, luca_parity, run_weekly
+from mirror.weekly import _luca_anchor, fetch_luca_production_digest, luca_parity, run_weekly
 from support import canonical_temporary_directory
 from test_mirror_support import MirrorHarness
 
@@ -135,10 +135,11 @@ class LucaFixture(unittest.TestCase):
         def run(command: list[str] | tuple[str, ...], cwd: Path) -> subprocess.CompletedProcess[str]:
             if tuple(command[:3]) == ("git", "pull", "--ff-only"):
                 return _completed(command, pull_code, stderr="pull rejected" if pull_code else "")
+            install_root = Path(command[command.index("--dir") + 1])
             if "build" in command:
-                content_hash = _persona_content_hash(self.staging / "pack")
+                content_hash = _persona_content_hash(install_root / "pack")
                 if build_code == 0:
-                    build = self.staging / "build"
+                    build = install_root / "build"
                     build.mkdir(parents=True, exist_ok=True)
                     (build / "manifest.json").write_text(
                         json.dumps({"content_hash": content_hash}) + "\n", encoding="utf-8"
@@ -284,6 +285,51 @@ class LucaParityTests(LucaFixture):
         args, kwargs = invoked.call_args
         self.assertEqual(args[0], ("ssh", "example-vps", "hash"))
         self.assertNotIn("shell", kwargs)
+
+    def test_anchor_reader_preserves_hardened_weekly_errors(self) -> None:
+        anchor = self.write_anchor(HASH_A)
+        self.assertEqual(_luca_anchor(self.home), HASH_A)
+
+        os.chmod(anchor, 0o644)
+        with self.assertRaises(MirrorError) as wrong_mode:
+            _luca_anchor(self.home)
+        self.assertEqual(
+            str(wrong_mode.exception),
+            f"production anchor must have mode 0600: {anchor}",
+        )
+
+        anchor.unlink()
+        target = self.root / "anchor-target.json"
+        target.write_text(json.dumps({"content_hash": HASH_A}), encoding="utf-8")
+        os.chmod(target, 0o600)
+        anchor.symlink_to(target)
+        with self.assertRaises(MirrorError) as unsafe_shape:
+            _luca_anchor(self.home)
+        self.assertEqual(
+            str(unsafe_shape.exception),
+            f"production anchor has unsafe shape: {anchor}",
+        )
+
+        anchor.unlink()
+        anchor.write_text(
+            json.dumps({"content_hash": HASH_A, "extra": True}),
+            encoding="utf-8",
+        )
+        os.chmod(anchor, 0o600)
+        with self.assertRaises(MirrorError) as bad_schema:
+            _luca_anchor(self.home)
+        self.assertEqual(
+            str(bad_schema.exception),
+            "production anchor schema must contain only content_hash",
+        )
+
+        anchor.write_text(json.dumps({"content_hash": "invalid"}), encoding="utf-8")
+        with self.assertRaises(MirrorError) as bad_hash:
+            _luca_anchor(self.home)
+        self.assertEqual(
+            str(bad_hash.exception),
+            "production anchor content_hash must be 64 lowercase hex characters",
+        )
 
 
 class LucaWeeklyTests(LucaFixture):

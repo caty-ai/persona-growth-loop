@@ -23,6 +23,7 @@ from growthlane.locking import (
     staging_contention_detail,
 )
 from growthlane.notify import Digest, send_soul_alert
+from growthlane.production_anchor import read_production_anchor
 from growthlane.soul import SoulError, verify_manifest
 from growthlane.tripwire import CAPS
 from growthlane.ucd_runtime import runtime_status
@@ -197,22 +198,10 @@ def fetch_luca_production_digest() -> str:
 
 
 def _luca_anchor(pgl_home: Path) -> str:
-    path = pgl_home / "state" / "luca-prod-anchor.json"
     try:
-        metadata = os.lstat(path)
-    except OSError as exc:
-        raise MirrorError(f"production anchor unavailable: {path}: {exc}") from exc
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise MirrorError(f"production anchor has unsafe shape: {path}")
-    if stat.S_IMODE(metadata.st_mode) != 0o600:
-        raise MirrorError(f"production anchor must have mode 0600: {path}")
-    value = read_json_nofollow(path)
-    if not isinstance(value, dict) or set(value) != {"content_hash"}:
-        raise MirrorError("production anchor schema must contain only content_hash")
-    content_hash = value.get("content_hash")
-    if not isinstance(content_hash, str) or _CONTENT_HASH.fullmatch(content_hash) is None:
-        raise MirrorError("production anchor content_hash must be 64 lowercase hex characters")
-    return content_hash
+        return read_production_anchor(pgl_home)
+    except ValueError as exc:
+        raise MirrorError(str(exc)) from exc
 
 
 def luca_parity(

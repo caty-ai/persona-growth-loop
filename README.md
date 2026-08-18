@@ -150,6 +150,8 @@ Honest state of the two production faces, as of 2026-08-12:
 - **Engine face (remote persona engine)** — observation is complete and running; **injection is intentionally not enabled yet**: it waits behind its own approval gate with an evidence packet under review
 - **Other agents** — a rollout wave is designed but not started
 
+The v0.2.0 release adds stream-mode deploy acceptance with an owned status oracle, a closed set of rejection reason codes with per-unit restart verification, a warm-up timeout and a 60-second accept turn budget, g0 anchor fallback for the nightly bootstrap, and a persona CLI launched from the clone through node.
+
 PGL grows style slowly, on evidence, behind gates. If you want a plug-and-play personality pack or instant persona fine-tuning, PGL is deliberately not that tool.
 
 The design that produced this status is frozen and documented — that is the deep half of the repository.
