@@ -9,8 +9,10 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import sqlite3
+import socket
 import subprocess
 import sys
 import tempfile
@@ -78,6 +80,16 @@ def content_hash(pack: Path) -> str:
         digest.update(data)
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _peer_disconnected(connection):
+    readable, _, _ = select.select([connection], [], [], 0)
+    if not readable:
+        return False
+    try:
+        return connection.recv(1, socket.MSG_PEEK) == b""
+    except OSError:
+        return True
 
 
 class LucaDispatchTests(unittest.TestCase):
@@ -1668,6 +1680,11 @@ if exit_path.is_file():
                 length = int(handler.headers["Content-Length"])
                 body = json.loads(handler.rfile.read(length))
                 with record_lock:
+                    if len(records) >= len(session_ids):
+                        handler.send_error(
+                            500, "unexpected extra request beyond fixture session_ids"
+                        )
+                        return
                     session_id = session_ids[len(records)]
                     record = {
                         "path": handler.path,
@@ -1709,7 +1726,9 @@ if exit_path.is_file():
                     handler.wfile.write(b"data: unread-body-bytes\n\n")
                     handler.wfile.flush()
                     record["body_writes"] += 1
-                    connection_open = handler.connection.fileno() >= 0
+                    status_write_while_open = not _peer_disconnected(
+                        handler.connection
+                    )
                     (install / "state/status.json").write_text(
                         json.dumps(
                             {
@@ -1723,9 +1742,7 @@ if exit_path.is_file():
                         encoding="utf-8",
                     )
                     record["status_writes"] += 1
-                    record["status_write_while_open"] = (
-                        connection_open and handler.connection.fileno() >= 0
-                    )
+                    record["status_write_while_open"] = status_write_while_open
                     while True:
                         handler.wfile.write(b"data: unread-body-bytes\n\n")
                         handler.wfile.flush()
@@ -1762,7 +1779,8 @@ if exit_path.is_file():
                 pass
             connection.close()
         server.server_close()
-        thread.join(timeout=1)
+        if thread is not None:
+            thread.join(timeout=1)
 
     def _assert_accept_streams_held(self, records):
         for item in records:
@@ -1817,6 +1835,18 @@ if exit_path.is_file():
                 (BrokenPipeError, ConnectionResetError),
             )
             self.assertFalse(record["stream_completed"])
+
+    def test_peer_disconnected_probe_discriminates(self):
+        left, right = socket.socketpair()
+        try:
+            self.assertFalse(_peer_disconnected(left))
+            right.sendall(b"x")
+            self.assertFalse(_peer_disconnected(left))
+            self.assertEqual(left.recv(1), b"x")
+            right.close()
+            self.assertTrue(_peer_disconnected(left))
+        finally:
+            left.close()
 
     def test_accept_uses_loopback_token_restores_pre_mode_and_returns_uuid_array(self):
         module = load_dispatch_module("luca_dispatch_accept_success")
