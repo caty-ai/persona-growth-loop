@@ -149,6 +149,7 @@ Honest state of the two production faces, as of 2026-08-12:
 - **Local face (Claude Code)** — the full nightly loop is live: observation, distillation, adoption, and mirror reports have run in production since 2026-08-05
 - **Engine face (remote persona engine)** — observation is complete and running; **injection is intentionally not enabled yet**: it waits behind its own approval gate with an evidence packet under review
 - **Other agents** — a rollout wave is designed but not started
+- **v0.2.0** — stream-mode deploy acceptance with an owned status oracle, a closed set of rejection reason codes, g0 anchor fallback for the nightly bootstrap, and a persona CLI launched from the clone through node
 
 PGL grows style slowly, on evidence, behind gates. If you want a plug-and-play personality pack or instant persona fine-tuning, PGL is deliberately not that tool.
 
