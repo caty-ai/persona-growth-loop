@@ -96,7 +96,10 @@ class LucaNightlyTests(unittest.TestCase):
         real_weekly_marker: bool = False,
     ) -> int:
         green = SimpleNamespace(
-            status="GREEN", committed_hash=HASH, detail="green"
+            status="GREEN",
+            committed_hash=HASH,
+            detail="green",
+            expected_source="ledger",
         )
         lifecycle = lifecycle or SimpleNamespace(
             deploy_started=False,
@@ -107,7 +110,8 @@ class LucaNightlyTests(unittest.TestCase):
         parity = parity or SimpleNamespace(status="GREEN", detail="green")
         selected_reconciliation = reconciliation or green
 
-        def reconcile(*_args: object) -> object:
+        def reconcile(*_args: object, **kwargs: object) -> object:
+            self.assertEqual(kwargs, {"pgl_home": self.pgl_home})
             events.append("g0")
             return selected_reconciliation
 
@@ -487,6 +491,7 @@ class LucaNightlyTests(unittest.TestCase):
             status="GREEN",
             committed_hash=HASH,
             detail="green",
+            expected_source="ledger",
         )
         green_parity = SimpleNamespace(status="GREEN", detail="green")
         patches = (
@@ -603,6 +608,47 @@ class LucaNightlyTests(unittest.TestCase):
         self.assertEqual(events, ["pull", "g0", "a-a2", "weekly", "a3"])
         deploy.assert_not_called()
         push.assert_not_called()
+
+    def test_anchor_based_green_emits_reconciliation_detail_once(self) -> None:
+        events: list[str] = []
+        detail = "production digest matches expected from production anchor (no committed snapshot)"
+        reconciliation = SimpleNamespace(
+            status="GREEN",
+            committed_hash=HASH,
+            detail=detail,
+            expected_source="anchor",
+        )
+
+        self.assertEqual(
+            self._run(events, FaceResult(False, None, HASH), reconciliation=reconciliation),
+            0,
+        )
+
+        self.assertEqual(events, ["pull", "g0", "a-a2", "weekly", "a3"])
+        digest_lines = (self.pgl_home / "digest" / "2026-08-10.md").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        self.assertEqual(digest_lines, [f"- luca: g0 {detail}"])
+
+    def test_ledger_based_green_emits_no_reconciliation_digest_line(self) -> None:
+        events: list[str] = []
+        reconciliation = SimpleNamespace(
+            status="GREEN",
+            committed_hash=HASH,
+            detail="production digest matches committed Luca snapshot",
+            expected_source="ledger",
+        )
+
+        self.assertEqual(
+            self._run(events, FaceResult(False, None, HASH), reconciliation=reconciliation),
+            0,
+        )
+
+        self.assertEqual(events, ["pull", "g0", "a-a2", "weekly", "a3"])
+        digest_lines = (self.pgl_home / "digest" / "2026-08-10.md").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        self.assertEqual(digest_lines, ["- nightly: no changes"])
 
     def test_g0_mismatch_and_unavailable_are_red_stops(self) -> None:
         for status in ("RED", "UNAVAILABLE"):

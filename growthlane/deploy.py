@@ -23,7 +23,15 @@ from collectors.hermes_luca.adapters import SSHAdapter
 from collectors.hermes_luca.config import load_config as load_luca_collector_config
 from growthlane.gates import check_killswitch
 from growthlane.ledger import validate_ledger
-from mirror.common import MirrorError, atomic_json, atomic_write, read_bytes_nofollow
+from growthlane.production_anchor import (
+    read_production_anchor as _read_production_anchor,
+    write_production_anchor as _write_production_anchor,
+)
+from mirror.common import (
+    MirrorError,
+    atomic_write,
+    read_bytes_nofollow,
+)
 from mirror.weekly import fetch_luca_production_digest
 
 
@@ -507,10 +515,17 @@ class ReconciliationResult:
     production_hash: str | None
     committed_hash: str | None
     detail: str
+    expected_source: Literal["ledger", "anchor"] | None
 
 
 class _UniqueSafeLoader(yaml.SafeLoader):
     pass
+
+
+class _DuplicateInstallDeclarationError(ValueError):
+    def __init__(self, key: object) -> None:
+        self.key = key
+        super().__init__(f"duplicate install declaration: {key}")
 
 
 def _construct_unique_mapping(
@@ -520,7 +535,7 @@ def _construct_unique_mapping(
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
         if key in result:
-            raise ValueError(f"duplicate install declaration: {key}")
+            raise _DuplicateInstallDeclarationError(key)
         result[key] = loader.construct_object(value_node, deep=deep)
     return result
 
@@ -983,12 +998,14 @@ def recover_production(
 
 
 def committed_snapshot_hash(git_show_ledger_text: str) -> str:
-    try:
-        value = yaml.safe_load(git_show_ledger_text)
-    except yaml.YAMLError as exc:
-        raise ValueError("committed Luca ledger is invalid YAML") from exc
-    validated = validate_ledger(value, "luca")
+    validated = _validated_committed_ledger(git_show_ledger_text)
+    return _committed_snapshot_hash(validated)
+
+
+def _committed_snapshot_hash(validated: Mapping[str, object]) -> str:
     snapshots = validated["snapshots"]
+    if not isinstance(snapshots, list):
+        raise ValueError("committed Luca ledger snapshots are invalid")
     if not snapshots:
         raise ValueError("committed Luca ledger has no snapshot anchor")
     last = snapshots[-1]
@@ -998,30 +1015,83 @@ def committed_snapshot_hash(git_show_ledger_text: str) -> str:
     return content_hash
 
 
+def _committed_ledger_parse_error(exc: Exception) -> str:
+    detail = str(exc)
+    if isinstance(exc, _DuplicateInstallDeclarationError):
+        return (
+            "committed Luca ledger has a duplicate key: "
+            f"{exc.key}"
+        )
+    if isinstance(exc, TypeError) and "unhashable type:" in detail:
+        return f"committed Luca ledger has an unhashable key: {detail}"
+    return f"committed Luca ledger could not be parsed: {detail}"
+
+
+def _validated_committed_ledger(git_show_ledger_text: str) -> dict[str, object]:
+    try:
+        # yaml.safe_dump never emits merge keys, so rejecting << cannot affect a
+        # writer-produced ledger. Shared-list aliases can be emitted and are
+        # accepted normally by this loader.
+        value = yaml.load(git_show_ledger_text, Loader=_UniqueSafeLoader)
+    except yaml.YAMLError as exc:
+        raise ValueError("committed Luca ledger is invalid YAML") from exc
+    except (ValueError, TypeError) as exc:
+        raise ValueError(_committed_ledger_parse_error(exc)) from exc
+    # The production seed contains only face/phrases/schema_version. Requiring
+    # snapshots would stop every bootstrap night; validate_ledger canonicalizes
+    # the missing key, and forging snapshots is no lesser bar than forging the anchor.
+    return validate_ledger(value, "luca")
+
+
 def reconcile_production(
     git_show_ledger_text: str,
     *,
+    pgl_home: Path | None = None,
     production_digest: ProductionDigest = fetch_luca_production_digest,
 ) -> ReconciliationResult:
     try:
-        expected = committed_snapshot_hash(git_show_ledger_text)
+        validated = _validated_committed_ledger(git_show_ledger_text)
+        if validated["snapshots"]:
+            expected = _committed_snapshot_hash(validated)
+            expected_from_anchor = False
+            expected_source: Literal["ledger", "anchor"] | None = "ledger"
+        else:
+            if pgl_home is None:
+                raise ValueError(
+                    "production anchor source unavailable for committed Luca ledger with no snapshots"
+                )
+            expected = read_production_anchor(pgl_home)
+            expected_from_anchor = True
+            expected_source = "anchor"
         production = production_digest()
         if not isinstance(production, str) or _CONTENT_HASH.fullmatch(production) is None:
             raise MirrorError("production digest helper returned a non-hash value")
     except Exception as exc:
-        return ReconciliationResult("UNAVAILABLE", None, None, str(exc))
+        return ReconciliationResult("UNAVAILABLE", None, None, str(exc), None)
     if production != expected:
         return ReconciliationResult(
             "RED",
             production,
             expected,
-            "production digest differs from committed Luca snapshot",
+            (
+                "production digest differs from expected production anchor "
+                "(no committed snapshot)"
+                if expected_from_anchor
+                else "production digest differs from committed Luca snapshot"
+            ),
+            expected_source,
         )
     return ReconciliationResult(
         "GREEN",
         production,
         expected,
-        "production digest matches committed Luca snapshot",
+        (
+            "production digest matches expected from production anchor "
+            "(no committed snapshot)"
+            if expected_from_anchor
+            else "production digest matches committed Luca snapshot"
+        ),
+        expected_source,
     )
 
 
@@ -1223,13 +1293,12 @@ def resolve_acceptance_window(
     )
 
 
+def read_production_anchor(pgl_home: Path) -> str:
+    return _read_production_anchor(pgl_home)
+
+
 def write_production_anchor(pgl_home: Path, content_hash: str) -> None:
-    if _CONTENT_HASH.fullmatch(content_hash) is None:
-        raise ValueError("production anchor must be 64 lowercase hex characters")
-    atomic_json(
-        pgl_home / "state/luca-prod-anchor.json",
-        {"content_hash": content_hash},
-    )
+    _write_production_anchor(pgl_home, content_hash)
 
 
 __all__ = [
@@ -1258,6 +1327,7 @@ __all__ = [
     "is_private_activity_hold",
     "load_lifecycle_state",
     "recent_private_activity",
+    "read_production_anchor",
     "reconcile_production",
     "record_commit_completed",
     "record_deploy_aborted",

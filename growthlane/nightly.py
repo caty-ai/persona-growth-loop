@@ -273,11 +273,16 @@ def luca_main(argv: list[str] | None = None) -> int:
         )
 
         committed_ledger = _overlay_git(home, "show", f"HEAD:{profile.ledger_path}")
-        reconciliation = luca_deploy.reconcile_production(committed_ledger)
+        reconciliation = luca_deploy.reconcile_production(
+            committed_ledger,
+            pgl_home=pgl_home,
+        )
         if reconciliation.status != "GREEN":
             raise LucaNightlyError(
                 f"Luca g0 reconciliation {reconciliation.status}: {reconciliation.detail}"
             )
+        if reconciliation.expected_source == "anchor":
+            digest.emit(f"luca: g0 {reconciliation.detail}")
 
         # Shared a--a2 remains the source of CP/killswitch/mirror liveness.
         check_all(pgl_home, "luca", run_date)

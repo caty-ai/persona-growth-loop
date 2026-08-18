@@ -864,8 +864,11 @@ class LucaNightlyDeployTests(unittest.TestCase):
             production_digest=lambda: (_ for _ in ()).throw(OSError("offline")),
         )
         self.assertEqual(green.status, "GREEN")
+        self.assertEqual(green.expected_source, "ledger")
         self.assertEqual(red.status, "RED")
+        self.assertEqual(red.expected_source, "ledger")
         self.assertEqual(unavailable.status, "UNAVAILABLE")
+        self.assertIsNone(unavailable.expected_source)
         self.assertIsNone(unavailable.production_hash)
         corrupt = ledger_text.replace("phrases: []", "phrases: invalid")
         self.assertEqual(
@@ -874,6 +877,454 @@ class LucaNightlyDeployTests(unittest.TestCase):
             ).status,
             "UNAVAILABLE",
         )
+        with mock.patch.object(
+            deploy,
+            "read_production_anchor",
+            side_effect=AssertionError("invalid YAML must not consult the anchor"),
+        ) as invalid_yaml_anchor_reader:
+            invalid_yaml = deploy.reconcile_production(
+                "snapshots: [\n",
+                pgl_home=self.pgl_home,
+                production_digest=lambda: CONTENT_HASH,
+            )
+        self.assertEqual(invalid_yaml.status, "UNAVAILABLE")
+        self.assertEqual(invalid_yaml.detail, "committed Luca ledger is invalid YAML")
+        invalid_yaml_anchor_reader.assert_not_called()
+
+    def test_reconciliation_uses_production_anchor_for_empty_snapshot_ledger(self) -> None:
+        ledger_text = yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "face": "luca",
+                "phrases": [],
+                "retired_ids": [],
+                "retired_text_hashes": [],
+                "history": [],
+                "snapshots": [],
+            }
+        )
+        deploy.write_production_anchor(self.pgl_home, CONTENT_HASH)
+
+        green = deploy.reconcile_production(
+            ledger_text,
+            pgl_home=self.pgl_home,
+            production_digest=lambda: CONTENT_HASH,
+        )
+        red = deploy.reconcile_production(
+            ledger_text,
+            pgl_home=self.pgl_home,
+            production_digest=lambda: OLD_HASH,
+        )
+
+        self.assertEqual(green.status, "GREEN")
+        self.assertEqual(green.expected_source, "anchor")
+        self.assertEqual(green.committed_hash, CONTENT_HASH)
+        self.assertIn("production anchor (no committed snapshot)", green.detail)
+        self.assertEqual(red.status, "RED")
+        self.assertEqual(red.expected_source, "anchor")
+        self.assertEqual(red.committed_hash, CONTENT_HASH)
+        self.assertIn("production anchor (no committed snapshot)", red.detail)
+
+        (self.pgl_home / "state/luca-prod-anchor.json").unlink()
+        missing = deploy.reconcile_production(
+            ledger_text,
+            pgl_home=self.pgl_home,
+            production_digest=lambda: CONTENT_HASH,
+        )
+        no_source = deploy.reconcile_production(
+            ledger_text,
+            production_digest=lambda: CONTENT_HASH,
+        )
+        self.assertEqual(missing.status, "UNAVAILABLE")
+        self.assertEqual(no_source.status, "UNAVAILABLE")
+
+    def test_reconciliation_accepts_aliases_and_uses_production_anchor(self) -> None:
+        ledger_text = "\n".join(
+            (
+                "schema_version: 1",
+                "face: luca",
+                "phrases: []",
+                "retired_ids: []",
+                "retired_text_hashes: []",
+                "history: &e []",
+                "snapshots: *e",
+                "",
+            )
+        )
+        deploy.write_production_anchor(self.pgl_home, CONTENT_HASH)
+
+        result = deploy.reconcile_production(
+            ledger_text,
+            pgl_home=self.pgl_home,
+            production_digest=lambda: CONTENT_HASH,
+        )
+
+        self.assertEqual(result.status, "GREEN")
+        self.assertEqual(result.expected_source, "anchor")
+        self.assertEqual(result.committed_hash, CONTENT_HASH)
+
+    def test_committed_snapshot_hash_propagates_non_parse_loader_errors(self) -> None:
+        for error_type in (RuntimeError, AssertionError, MemoryError):
+            with (
+                self.subTest(error_type=error_type),
+                mock.patch.object(
+                    deploy.yaml,
+                    "load",
+                    side_effect=error_type("loader boom"),
+                ),
+                self.assertRaises(error_type) as raised,
+            ):
+                deploy.committed_snapshot_hash("snapshots: []\n")
+
+            self.assertEqual(str(raised.exception), "loader boom")
+
+    def test_reconciliation_contextualizes_invalid_unquoted_date(self) -> None:
+        ledger_text = "\n".join(
+            (
+                "schema_version: 1",
+                "face: luca",
+                "phrases: []",
+                "retired_ids: []",
+                "retired_text_hashes: []",
+                "history: []",
+                "snapshots:",
+                "  - at: 2026-02-30",
+                "    source_sha: abcdef0",
+                f"    content_hash: {CONTENT_HASH}",
+                "",
+            )
+        )
+
+        result = deploy.reconcile_production(
+            ledger_text,
+            production_digest=lambda: CONTENT_HASH,
+        )
+
+        self.assertEqual(result.status, "UNAVAILABLE")
+        context = "committed Luca ledger could not be parsed: "
+        self.assertTrue(result.detail.startswith(context))
+        with self.assertRaises(ValueError) as raised:
+            deploy.committed_snapshot_hash(ledger_text)
+        self.assertIs(type(raised.exception.__cause__), ValueError)
+        self.assertEqual(
+            str(raised.exception), f"{context}{raised.exception.__cause__}"
+        )
+        self.assertEqual(result.detail, str(raised.exception))
+        self.assertIn("day 30", str(raised.exception.__cause__))
+
+    def test_reconciliation_rejects_duplicate_top_level_snapshots_without_fallback(
+        self,
+    ) -> None:
+        ledger_text = "\n".join(
+            (
+                "schema_version: 1",
+                "face: luca",
+                "phrases: []",
+                "retired_ids: []",
+                "retired_text_hashes: []",
+                "history: []",
+                "snapshots:",
+                "  - at: '2026-08-10'",
+                "    source_sha: abcdef0",
+                f"    content_hash: {CONTENT_HASH}",
+                "snapshots: []",
+                "",
+            )
+        )
+        digest = mock.Mock(
+            side_effect=AssertionError("production digest must not be consulted")
+        )
+
+        with mock.patch.object(
+            deploy,
+            "read_production_anchor",
+            side_effect=AssertionError(
+                "duplicate snapshots must not fall back to anchor"
+            ),
+        ) as anchor_reader:
+            result = deploy.reconcile_production(
+                ledger_text,
+                pgl_home=self.pgl_home,
+                production_digest=digest,
+            )
+
+        self.assertEqual(result.status, "UNAVAILABLE")
+        self.assertEqual(
+            result.detail, "committed Luca ledger has a duplicate key: snapshots"
+        )
+        anchor_reader.assert_not_called()
+        digest.assert_not_called()
+
+    def test_reconciliation_rejects_nested_duplicate_snapshot_mapping(self) -> None:
+        ledger_text = "\n".join(
+            (
+                "schema_version: 1",
+                "face: luca",
+                "phrases: []",
+                "retired_ids: []",
+                "retired_text_hashes: []",
+                "history: []",
+                "snapshots:",
+                "  - at: '2026-08-10'",
+                "    source_sha: abcdef0",
+                f"    content_hash: {CONTENT_HASH}",
+                f"    content_hash: {OLD_HASH}",
+                "",
+            )
+        )
+        digest = mock.Mock(
+            side_effect=AssertionError("production digest must not be consulted")
+        )
+
+        with mock.patch.object(
+            deploy,
+            "read_production_anchor",
+            side_effect=AssertionError(
+                "invalid snapshot must not fall back to anchor"
+            ),
+        ) as anchor_reader:
+            result = deploy.reconcile_production(
+                ledger_text,
+                pgl_home=self.pgl_home,
+                production_digest=digest,
+            )
+
+        self.assertEqual(result.status, "UNAVAILABLE")
+        self.assertEqual(
+            result.detail,
+            "committed Luca ledger has a duplicate key: content_hash",
+        )
+        anchor_reader.assert_not_called()
+        digest.assert_not_called()
+        with self.assertRaisesRegex(
+            ValueError, "committed Luca ledger has a duplicate key: content_hash"
+        ) as raised:
+            deploy.committed_snapshot_hash(ledger_text)
+        self.assertEqual(
+            str(raised.exception.__cause__),
+            "duplicate install declaration: content_hash",
+        )
+
+    def test_reconciliation_rejects_merge_keys_without_fallback(self) -> None:
+        ledger_text = "\n".join(
+            (
+                "schema_version: 1",
+                "face: luca",
+                "phrases: []",
+                "retired_ids: []",
+                "retired_text_hashes: []",
+                "history: []",
+                "defaults: &snapshot_defaults",
+                f"  source_sha: abcdef0",
+                f"  content_hash: {CONTENT_HASH}",
+                "snapshots:",
+                "  - at: '2026-08-10'",
+                "    <<: *snapshot_defaults",
+                "",
+            )
+        )
+        digest = mock.Mock(
+            side_effect=AssertionError("production digest must not be consulted")
+        )
+
+        with mock.patch.object(
+            deploy,
+            "read_production_anchor",
+            side_effect=AssertionError("merge-key ledger must not fall back to anchor"),
+        ) as anchor_reader:
+            result = deploy.reconcile_production(
+                ledger_text,
+                pgl_home=self.pgl_home,
+                production_digest=digest,
+            )
+
+        self.assertEqual(result.status, "UNAVAILABLE")
+        self.assertEqual(
+            result.detail,
+            "committed Luca ledger is invalid YAML",
+        )
+        anchor_reader.assert_not_called()
+        digest.assert_not_called()
+
+    def test_reconciliation_rejects_unhashable_keys_without_fallback(self) -> None:
+        ledger_text = "? [snapshots]\n: []\n"
+        digest = mock.Mock(
+            side_effect=AssertionError("production digest must not be consulted")
+        )
+
+        with mock.patch.object(
+            deploy,
+            "read_production_anchor",
+            side_effect=AssertionError("unhashable keys must not fall back to anchor"),
+        ) as anchor_reader:
+            result = deploy.reconcile_production(
+                ledger_text,
+                pgl_home=self.pgl_home,
+                production_digest=digest,
+            )
+
+        self.assertEqual(result.status, "UNAVAILABLE")
+        self.assertIn("committed Luca ledger has an unhashable key:", result.detail)
+        anchor_reader.assert_not_called()
+        digest.assert_not_called()
+        with self.assertRaisesRegex(
+            ValueError, "committed Luca ledger has an unhashable key:"
+        ) as raised:
+            deploy.committed_snapshot_hash(ledger_text)
+        self.assertIsInstance(raised.exception.__cause__, TypeError)
+        generic_typeerror_ledger = yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "face": "luca",
+                "phrases": [],
+                "retired_ids": [],
+                "retired_text_hashes": [],
+                "history": [],
+                "snapshots": [],
+            }
+        )
+        with mock.patch.object(deploy.yaml, "load", side_effect=TypeError("loader boom")):
+            with self.assertRaisesRegex(
+                ValueError,
+                "committed Luca ledger could not be parsed: loader boom",
+            ) as raised:
+                deploy.committed_snapshot_hash(generic_typeerror_ledger)
+
+        self.assertIsInstance(raised.exception.__cause__, TypeError)
+
+    def test_reconciliation_real_production_seed_shape_uses_anchor(self) -> None:
+        ledger_text = yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "face": "luca",
+                "phrases": [],
+            }
+        )
+        deploy.write_production_anchor(self.pgl_home, CONTENT_HASH)
+
+        green = deploy.reconcile_production(
+            ledger_text,
+            pgl_home=self.pgl_home,
+            production_digest=lambda: CONTENT_HASH,
+        )
+        red = deploy.reconcile_production(
+            ledger_text,
+            pgl_home=self.pgl_home,
+            production_digest=lambda: OLD_HASH,
+        )
+
+        self.assertEqual(green.status, "GREEN")
+        self.assertEqual(green.expected_source, "anchor")
+        self.assertEqual(red.status, "RED")
+        self.assertEqual(red.expected_source, "anchor")
+
+    def test_reconciliation_rejects_unsafe_or_invalid_bootstrap_anchor(self) -> None:
+        ledger_text = yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "face": "luca",
+                "phrases": [],
+                "retired_ids": [],
+                "retired_text_hashes": [],
+                "history": [],
+                "snapshots": [],
+            }
+        )
+        anchor = self.pgl_home / "state/luca-prod-anchor.json"
+        anchor.parent.mkdir(parents=True, exist_ok=True)
+
+        anchor.write_text(json.dumps({"content_hash": CONTENT_HASH}), encoding="utf-8")
+        os.chmod(anchor, 0o644)
+        wrong_mode = deploy.reconcile_production(
+            ledger_text,
+            pgl_home=self.pgl_home,
+            production_digest=lambda: CONTENT_HASH,
+        )
+        self.assertEqual(wrong_mode.status, "UNAVAILABLE")
+        self.assertIn("mode 0600", wrong_mode.detail)
+
+        anchor.unlink()
+        target = self.root / "anchor-target.json"
+        target.write_text(json.dumps({"content_hash": CONTENT_HASH}), encoding="utf-8")
+        os.chmod(target, 0o600)
+        anchor.symlink_to(target)
+        symlink = deploy.reconcile_production(
+            ledger_text,
+            pgl_home=self.pgl_home,
+            production_digest=lambda: CONTENT_HASH,
+        )
+        self.assertEqual(symlink.status, "UNAVAILABLE")
+        self.assertIn("unsafe shape", symlink.detail)
+
+        anchor.unlink()
+        anchor.write_text(json.dumps({"content_hash": CONTENT_HASH, "extra": True}), encoding="utf-8")
+        os.chmod(anchor, 0o600)
+        bad_schema = deploy.reconcile_production(
+            ledger_text,
+            pgl_home=self.pgl_home,
+            production_digest=lambda: CONTENT_HASH,
+        )
+        self.assertEqual(bad_schema.status, "UNAVAILABLE")
+        self.assertIn("schema", bad_schema.detail)
+
+        anchor.write_text(json.dumps({"content_hash": "invalid"}), encoding="utf-8")
+        bad_hash = deploy.reconcile_production(
+            ledger_text,
+            pgl_home=self.pgl_home,
+            production_digest=lambda: CONTENT_HASH,
+        )
+        self.assertEqual(bad_hash.status, "UNAVAILABLE")
+        self.assertIn("64 lowercase hex", bad_hash.detail)
+
+    def test_reconciliation_snapshot_wins_without_consulting_anchor(self) -> None:
+        ledger_text = yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "face": "luca",
+                "phrases": [],
+                "retired_ids": [],
+                "retired_text_hashes": [],
+                "history": [],
+                "snapshots": [
+                    {
+                        "at": "2026-08-10",
+                        "source_sha": "abcdef0",
+                        "content_hash": CONTENT_HASH,
+                    }
+                ],
+            }
+        )
+        deploy.write_production_anchor(self.pgl_home, OLD_HASH)
+
+        with mock.patch.object(
+            deploy,
+            "read_production_anchor",
+            side_effect=AssertionError("anchor must not be consulted"),
+        ) as anchor_reader:
+            result = deploy.reconcile_production(
+                ledger_text,
+                pgl_home=self.pgl_home,
+                production_digest=lambda: CONTENT_HASH,
+            )
+
+        self.assertEqual(result.status, "GREEN")
+        self.assertEqual(result.committed_hash, CONTENT_HASH)
+        self.assertEqual(result.detail, "production digest matches committed Luca snapshot")
+        anchor_reader.assert_not_called()
+
+        invalid_snapshot = ledger_text.replace(CONTENT_HASH, "invalid")
+        with mock.patch.object(
+            deploy,
+            "read_production_anchor",
+            side_effect=AssertionError("invalid snapshot must not fall back to anchor"),
+        ) as invalid_anchor_reader:
+            invalid = deploy.reconcile_production(
+                invalid_snapshot,
+                pgl_home=self.pgl_home,
+                production_digest=lambda: CONTENT_HASH,
+            )
+        self.assertEqual(invalid.status, "UNAVAILABLE")
+        invalid_anchor_reader.assert_not_called()
 
     def test_lifecycle_distinguishes_pending_new_from_resolved_old_and_new(self) -> None:
         journal.append_deploy_started(self.obs_root, ts=TIMESTAMP.isoformat())
