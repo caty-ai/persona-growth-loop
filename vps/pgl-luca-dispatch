@@ -31,6 +31,7 @@ import re
 import select
 import shlex
 import shutil
+import socket
 import sqlite3
 import stat
 import subprocess
@@ -72,6 +73,21 @@ _TEST_SENTINEL = ".pgl-luca-dispatch-test-root"
 _TEST_SENTINEL_CONTENT = b"pgl-luca-dispatch test root\n"
 
 _ERROR_LINE = "pgl-luca-dispatch: request rejected\n"
+_REASON_LINES: dict[str, str] = {
+    "accept-warmup-failed": "pgl-luca-dispatch: request rejected: accept-warmup-failed\n",
+    "accept-switch-request-failed": "pgl-luca-dispatch: request rejected: accept-switch-request-failed\n",
+    "accept-switch-request-timeout": "pgl-luca-dispatch: request rejected: accept-switch-request-timeout\n",
+    "accept-switch-not-applied": "pgl-luca-dispatch: request rejected: accept-switch-not-applied\n",
+    "accept-switch-metadata-mismatch": "pgl-luca-dispatch: request rejected: accept-switch-metadata-mismatch\n",
+    "accept-switch-failed": "pgl-luca-dispatch: request rejected: accept-switch-failed\n",
+    "accept-restore-failed": "pgl-luca-dispatch: request rejected: accept-restore-failed\n",
+    "accept-restore-retried": "pgl-luca-dispatch: request rejected: accept-restore-retried\n",
+    "restart-command-failed": "pgl-luca-dispatch: request rejected: restart-command-failed\n",
+    "restart-command-timeout": "pgl-luca-dispatch: request rejected: restart-command-timeout\n",
+    "restart-units-not-active": "pgl-luca-dispatch: request rejected: restart-units-not-active\n",
+    "restart-verification-failed": "pgl-luca-dispatch: request rejected: restart-verification-failed\n",
+}
+_REASON_CODES = frozenset(_REASON_LINES)
 _EPOCH = re.compile(r"^[0-9]{1,12}$")
 _OWNER_ID = re.compile(r"^[A-Za-z0-9+_-][A-Za-z0-9._:@+\-]{0,255}$")
 _MODE_ID = re.compile(r"^[a-z0-9-]+$")
@@ -104,9 +120,17 @@ _MAX_SAFE_INTEGER = (1 << 53) - 1
 _DOCTOR_TIMEOUT_SECONDS = 30
 _BUILD_TIMEOUT_SECONDS = 60
 _TRANSFER_TIMEOUT_SECONDS = 600
-_RESTART_TIMEOUT_SECONDS = 30
+# This dominates two sequential 90s stop timeouts plus margin.  A hung start
+# intentionally fails closed before systemd's theoretical 360s worst case,
+# while restart plus verification remains below the client's 300s SSH cap.
+_RESTART_TIMEOUT_SECONDS = 240
+_RESTART_VERIFY_SAMPLES = 3
+_RESTART_VERIFY_DWELL_SECONDS = 2
+_RESTART_VERIFY_TIMEOUT_SECONDS = 5
 _ACCEPT_TIMEOUT_SECONDS = 30
 _ACCEPT_RESTORE_RETRIES = 2
+_ASSERT_MODE_SETTLE_RETRIES = 2
+_ASSERT_MODE_SETTLE_DELAY_SECONDS = 1
 _DOCTOR_OUTPUT_LIMIT = 1024 * 1024
 _RSYNC_VERSION_TIMEOUT_SECONDS = 10
 _RSYNC_VERSION_OUTPUT_LIMIT = 16 * 1024
@@ -175,6 +199,28 @@ _RSYNC_RECEIVER_BACKPORT_FIXES = frozenset({"CVE-2024-12087", "CVE-2024-12088"})
 
 class DispatchError(Exception):
     """A deliberately detail-free dispatcher failure."""
+
+    def __init__(self, message="rejected", *, reason_code=None):
+        if reason_code is not None and reason_code not in _REASON_CODES:
+            raise ValueError("invalid reason code")
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
+class _AcceptRequestTimeout(DispatchError):
+    """The fixed acceptance request exceeded its bounded timeout."""
+
+
+class _FixedCommandTimeout(DispatchError):
+    """A fixed subprocess exceeded its bounded timeout."""
+
+
+class _FixedCommandExecutionError(DispatchError):
+    """A fixed subprocess could not be launched or observed."""
+
+
+class _FixedCommandRejected(DispatchError):
+    """A fixed subprocess completed with a nonzero exit status."""
 
 
 def _reject(_message: str = "rejected") -> None:
@@ -971,10 +1017,12 @@ def _run_fixed(
             shell=False,
             close_fds=True,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise _FixedCommandTimeout("fixed command failed") from exc
     except (OSError, subprocess.SubprocessError) as exc:
-        raise DispatchError("fixed command failed") from exc
+        raise _FixedCommandExecutionError("fixed command failed") from exc
     if result.returncode != 0:
-        _reject("fixed command rejected")
+        raise _FixedCommandRejected("fixed command rejected")
     if not inherit_stdio and (
         len(result.stdout) > _DOCTOR_OUTPUT_LIMIT or len(result.stderr) > _DOCTOR_OUTPUT_LIMIT
     ):
@@ -1414,12 +1462,48 @@ def _restart(systemctl_path: Path, install_root: Path) -> bytes:
             "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_dir}/bus",
         }
     )
-    _run_fixed(
-        [str(systemctl_path), "--user", "restart", *_SYSTEMD_UNITS],
-        timeout=_RESTART_TIMEOUT_SECONDS,
-        cwd=install_root,
-        environment=environment,
-    )
+    try:
+        _run_fixed(
+            [str(systemctl_path), "--user", "restart", *_SYSTEMD_UNITS],
+            timeout=_RESTART_TIMEOUT_SECONDS,
+            cwd=install_root,
+            environment=environment,
+        )
+    except _FixedCommandTimeout as exc:
+        raise DispatchError(
+            "restart failed", reason_code="restart-command-timeout"
+        ) from exc
+    except DispatchError as exc:
+        raise DispatchError(
+            "restart failed", reason_code="restart-command-failed"
+        ) from exc
+
+    for sample in range(_RESTART_VERIFY_SAMPLES):
+        for unit in _SYSTEMD_UNITS:
+            try:
+                _run_fixed(
+                    [str(systemctl_path), "--user", "is-active", "--quiet", unit],
+                    timeout=_RESTART_VERIFY_TIMEOUT_SECONDS,
+                    cwd=install_root,
+                    environment=environment,
+                )
+            except (_FixedCommandTimeout, _FixedCommandExecutionError) as exc:
+                raise DispatchError(
+                    "restart verification failed",
+                    reason_code="restart-verification-failed",
+                ) from exc
+            except _FixedCommandRejected as exc:
+                raise DispatchError(
+                    "restart verification failed",
+                    reason_code="restart-units-not-active",
+                ) from exc
+            except DispatchError as exc:
+                raise DispatchError(
+                    "restart verification failed",
+                    reason_code="restart-verification-failed",
+                ) from exc
+        if sample + 1 < _RESTART_VERIFY_SAMPLES:
+            _time.sleep(_RESTART_VERIFY_DWELL_SECONDS)
     return b""
 
 
@@ -1484,7 +1568,13 @@ def _send_accept_turn(token: str, port: int, conversation: str, utterance: str) 
             session_values = response.headers.get_all("X-Hermes-Session-Id") or []
             if len(response.read(_DOCTOR_OUTPUT_LIMIT + 1)) > _DOCTOR_OUTPUT_LIMIT:
                 _reject("accept response too large")
-    except (OSError, urllib.error.URLError, ValueError) as exc:
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            raise _AcceptRequestTimeout("accept request failed") from exc
+        raise DispatchError("accept request failed") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise _AcceptRequestTimeout("accept request failed") from exc
+    except (OSError, ValueError) as exc:
         raise DispatchError("accept request failed") from exc
     if len(session_values) != 1 or _UUID.fullmatch(session_values[0]) is None:
         _reject("accept session invalid")
@@ -1517,15 +1607,34 @@ def _expected_mode(manifest_path: Path, mode: str) -> tuple[int, str]:
     return metadata["bytes"], metadata["sha256"]
 
 
-def _assert_mode(status_path: Path, manifest_path: Path, mode: str) -> None:
+def _assert_mode(
+    status_path: Path, manifest_path: Path, mode: str, *, switch: bool
+) -> None:
     value = _status(status_path)
     expected_bytes, expected_hash = _expected_mode(manifest_path, mode)
-    if (
-        value["mode"] != mode
-        or value["block_bytes"] != expected_bytes
-        or value["block_sha256"] != expected_hash
-    ):
-        _reject("accept mode mismatch")
+    retries = _ASSERT_MODE_SETTLE_RETRIES if switch else 0
+    for retry in range(retries + 1):
+        if (
+            value["mode"] == mode
+            and value["block_bytes"] == expected_bytes
+            and value["block_sha256"] == expected_hash
+        ):
+            return
+        if retry < retries:
+            _time.sleep(_ASSERT_MODE_SETTLE_DELAY_SECONDS)
+            try:
+                value = _status(status_path)
+            except DispatchError:
+                pass
+    if switch:
+        if value["mode"] != mode:
+            raise DispatchError(
+                "accept mode mismatch", reason_code="accept-switch-not-applied"
+            )
+        raise DispatchError(
+            "accept mode mismatch", reason_code="accept-switch-metadata-mismatch"
+        )
+    _reject("accept mode mismatch")
 
 
 def _render_file_set(pack_root: Path) -> set[str]:
@@ -1557,34 +1666,65 @@ def _accept(install_root: Path, config_path: Path, backups_root: Path, kind: str
     conversation = f"persona-deploy-verify-{uuid.uuid4()}"
     sessions: list[str] = []
     primary_error: BaseException | None = None
+    primary_code: str | None = None
+    restore_code: str | None = None
     mode_changed = False
     restore_attempt_failed = False
-    sessions.append(_send_accept_turn(token, port, conversation, "deployment warm-up"))
+    try:
+        sessions.append(_send_accept_turn(token, port, conversation, "deployment warm-up"))
+    except DispatchError as exc:
+        raise DispatchError(
+            "acceptance failed", reason_code="accept-warmup-failed"
+        ) from exc
+    switch_request_complete = False
     try:
         mode_changed = True
-        sessions.append(_send_accept_turn(token, port, conversation, f"/persona {_VERIFY_MODE}"))
-        _assert_mode(status_path, manifest_path, _VERIFY_MODE)
+        switch_session = _send_accept_turn(
+            token, port, conversation, f"/persona {_VERIFY_MODE}"
+        )
+        switch_request_complete = True
+        sessions.append(switch_session)
+        _assert_mode(status_path, manifest_path, _VERIFY_MODE, switch=True)
     except BaseException as exc:
         primary_error = exc
+        code = exc.reason_code if isinstance(exc, DispatchError) else None
+        if not switch_request_complete:
+            if isinstance(exc, _AcceptRequestTimeout):
+                primary_code = "accept-switch-request-timeout"
+            else:
+                primary_code = "accept-switch-request-failed"
+        elif type(code) is str:
+            primary_code = code
+        else:
+            primary_code = "accept-switch-failed"
     restore_error: BaseException | None = None
     if mode_changed:
         for _attempt in range(_ACCEPT_RESTORE_RETRIES):
             try:
                 sessions.append(_send_accept_turn(token, port, conversation, f"/persona {pre_mode}"))
-                _assert_mode(status_path, manifest_path, pre_mode)
+                _assert_mode(status_path, manifest_path, pre_mode, switch=False)
                 restore_error = None
+                restore_code = None
                 break
             except BaseException as exc:
                 restore_attempt_failed = True
                 restore_error = exc
-        if restore_error is not None and primary_error is None:
-            primary_error = restore_error
+                restore_code = "accept-restore-failed"
+    if mode_changed and restore_error is not None:
+        raise DispatchError(
+            "acceptance failed with runtime mode unknown",
+            reason_code=restore_code or "accept-restore-failed",
+        ) from restore_error
     if primary_error is not None:
-        if mode_changed and restore_error is not None:
-            raise DispatchError("acceptance failed with runtime mode unknown") from restore_error
-        raise DispatchError("acceptance failed") from primary_error
+        raise DispatchError(
+            "acceptance failed",
+            reason_code=primary_code or "accept-switch-failed",
+        ) from primary_error
     if restore_attempt_failed:
-        raise DispatchError("acceptance failed")
+        raise DispatchError(
+            "acceptance failed",
+            reason_code="accept-restore-retried",
+        ) from restore_error
     return (json.dumps(sorted(set(sessions)), separators=(",", ":")) + "\n").encode("ascii")
 
 
@@ -1655,11 +1795,13 @@ def main() -> int:
         sys.stdout.buffer.write(output)
         sys.stdout.buffer.flush()
         return 0
-    except BaseException:
-        # One constant line avoids reflecting commands, paths, database errors,
-        # channel metadata, or conversation text into SSH logs.
+    except BaseException as exc:
+        # One author-time literal line avoids reflecting commands, paths,
+        # database errors, channel metadata, or conversation text into logs.
         try:
-            sys.stderr.write(_ERROR_LINE)
+            code = exc.reason_code if isinstance(exc, DispatchError) else None
+            line = _REASON_LINES.get(code, _ERROR_LINE) if type(code) is str else _ERROR_LINE
+            sys.stderr.write(line)
             sys.stderr.flush()
         except OSError:
             pass

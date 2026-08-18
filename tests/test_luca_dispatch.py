@@ -2,9 +2,11 @@ import hashlib
 import http.server
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -24,6 +26,10 @@ DISPATCH = REPO / "vps" / "pgl-luca-dispatch"
 PERSONA_BUILD_FIXTURE = REPO / "tests" / "fixtures" / "luca_dispatch" / "persona_build"
 ERROR_LINE = "pgl-luca-dispatch: request rejected\n"
 HAS_REAL_RSYNC = Path("/usr/bin/rsync").is_file()
+
+
+def reason_line(code):
+    return f"pgl-luca-dispatch: request rejected: {code}\n"
 
 
 def load_dispatch_module(name):
@@ -271,7 +277,45 @@ raise SystemExit(0 if not issues else 2)
         self.rsync_path.chmod(0o755)
         self.systemctl_path = self.root / "usr/bin/systemctl"
         self.systemctl_path.write_text(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PWD/systemctl.argv\"\n",
+            f"""#!{python}
+import os
+from pathlib import Path
+import sys
+import time
+
+ROOT = Path({str(self.root)!r})
+arguments = sys.argv[1:]
+line = " ".join(arguments)
+log = Path.cwd() / "systemctl.argv"
+with log.open("a", encoding="utf-8") as stream:
+    stream.write(line + "\\n")
+with (Path.cwd() / "systemctl.env").open("a", encoding="utf-8") as stream:
+    stream.write(
+        os.environ.get("XDG_RUNTIME_DIR", "")
+        + "|"
+        + os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+        + "\\n"
+    )
+
+if len(arguments) >= 2 and arguments[1] == "restart":
+    stem = "systemctl.restart"
+elif len(arguments) == 4 and arguments[1:3] == ["is-active", "--quiet"]:
+    unit = arguments[3]
+    matching = [entry for entry in log.read_text(encoding="utf-8").splitlines() if entry == line]
+    stem = f"systemctl.is-active.{{unit}}.{{len(matching)}}"
+    fallback = ROOT / f"systemctl.is-active.{{unit}}.exit"
+else:
+    raise SystemExit(99)
+
+sleep_path = ROOT / (stem + ".sleep")
+if sleep_path.is_file():
+    time.sleep(float(sleep_path.read_text(encoding="ascii")))
+exit_path = ROOT / (stem + ".exit")
+if not exit_path.is_file() and "fallback" in globals():
+    exit_path = fallback
+if exit_path.is_file():
+    raise SystemExit(int(exit_path.read_text(encoding="ascii")))
+""",
             encoding="utf-8",
         )
         self.systemctl_path.chmod(0o755)
@@ -1504,10 +1548,97 @@ raise SystemExit(0 if not issues else 2)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             (self.install / "systemctl.argv").read_text(encoding="utf-8").splitlines(),
-            ["--user", "restart", "hermes-gateway-luca", "hermes-api-luca"],
+            [
+                "--user restart hermes-gateway-luca hermes-api-luca",
+                "--user is-active --quiet hermes-gateway-luca",
+                "--user is-active --quiet hermes-api-luca",
+                "--user is-active --quiet hermes-gateway-luca",
+                "--user is-active --quiet hermes-api-luca",
+                "--user is-active --quiet hermes-gateway-luca",
+                "--user is-active --quiet hermes-api-luca",
+            ],
+        )
+        runtime_dir = f"/run/user/{os.getuid()}"
+        self.assertEqual(
+            (self.install / "systemctl.env").read_text(encoding="utf-8").splitlines(),
+            [f"{runtime_dir}|unix:path={runtime_dir}/bus"] * 7,
         )
 
-    def _run_accept_server(self):
+    def test_restart_rejects_mixed_unit_state_on_first_or_later_sample(self):
+        for sample in (1, 2):
+            with self.subTest(sample=sample):
+                for path in self.root.glob("systemctl.*.exit"):
+                    path.unlink()
+                for path in (self.install / "systemctl.argv", self.install / "systemctl.env"):
+                    path.unlink(missing_ok=True)
+                (self.root / f"systemctl.is-active.hermes-api-luca.{sample}.exit").write_text(
+                    "3\n", encoding="ascii"
+                )
+                result = self.run_dispatch("deploy restart", role="deploy")
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr, reason_line("restart-units-not-active"))
+
+    def test_restart_nonzero_reports_command_failed(self):
+        (self.root / "systemctl.restart.exit").write_text("1\n", encoding="ascii")
+        result = self.run_dispatch("deploy restart", role="deploy")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, reason_line("restart-command-failed"))
+
+    def test_restart_timeout_constant_is_plumbed_to_fixed_command(self):
+        (self.root / "systemctl.restart.sleep").write_text("2\n", encoding="ascii")
+        module = load_dispatch_module("luca_dispatch_restart_timeout")
+        with mock.patch.object(module, "_RESTART_TIMEOUT_SECONDS", 1):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._restart(self.systemctl_path, self.install)
+        self.assertEqual(caught.exception.reason_code, "restart-command-timeout")
+
+    def test_restart_verify_timeout_reports_verification_failed(self):
+        (self.root / "systemctl.is-active.hermes-gateway-luca.1.sleep").write_text(
+            "0.2\n", encoding="ascii"
+        )
+        module = load_dispatch_module("luca_dispatch_restart_verify_timeout")
+        with mock.patch.object(module, "_RESTART_VERIFY_TIMEOUT_SECONDS", 0.05):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._restart(self.systemctl_path, self.install)
+        self.assertEqual(caught.exception.reason_code, "restart-verification-failed")
+
+    def test_restart_verify_oserror_reports_verification_failed(self):
+        module = load_dispatch_module("luca_dispatch_restart_verify_oserror")
+        calls = 0
+
+        def run_fixed(*_arguments, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return None
+            raise module._FixedCommandExecutionError("fixed command failed")
+
+        with mock.patch.object(module, "_run_fixed", side_effect=run_fixed):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._restart(self.systemctl_path, self.install)
+        self.assertEqual(caught.exception.reason_code, "restart-verification-failed")
+
+    def test_restart_budget_dominates_stop_timeouts_and_stays_below_client_cap(self):
+        module = load_dispatch_module("luca_dispatch_restart_budget")
+        self.assertGreaterEqual(module._RESTART_TIMEOUT_SECONDS, 2 * 90 + 30)
+        total = (
+            module._RESTART_TIMEOUT_SECONDS
+            + module._RESTART_VERIFY_SAMPLES
+            * len(module._SYSTEMD_UNITS)
+            * module._RESTART_VERIFY_TIMEOUT_SECONDS
+            + (module._RESTART_VERIFY_SAMPLES - 1)
+            * module._RESTART_VERIFY_DWELL_SECONDS
+        )
+        self.assertLess(total, 300)
+
+    def _run_accept_server(
+        self,
+        *,
+        respond_before_write=False,
+        suppress_switch_status_write=False,
+    ):
         requests = []
         session_id = "12345678-1234-1234-1234-123456789abc"
         install = self.install
@@ -1522,6 +1653,7 @@ raise SystemExit(0 if not issues else 2)
                     handler.send_error(403)
                     return
                 utterance = body["input"]
+                status = None
                 if utterance.startswith("/persona "):
                     mode = utterance.split(" ", 1)[1]
                     if mode == "public":
@@ -1536,6 +1668,19 @@ raise SystemExit(0 if not issues else 2)
                         "block_bytes": block_bytes,
                         "block_sha256": block_sha256,
                     }
+                suppress_switch_write = (
+                    suppress_switch_status_write and utterance == "/persona mode-b"
+                )
+                delayed_status = (
+                    status
+                    if respond_before_write and utterance == "/persona mode-b"
+                    else None
+                )
+                if (
+                    status is not None
+                    and delayed_status is None
+                    and not suppress_switch_write
+                ):
                     (install / "state/status.json").write_text(
                         json.dumps(status), encoding="utf-8"
                     )
@@ -1544,6 +1689,12 @@ raise SystemExit(0 if not issues else 2)
                 handler.send_header("Content-Length", "2")
                 handler.end_headers()
                 handler.wfile.write(b"{}")
+                handler.wfile.flush()
+                if delayed_status is not None:
+                    time.sleep(0.1)
+                    (install / "state/status.json").write_text(
+                        json.dumps(delayed_status), encoding="utf-8"
+                    )
 
             def log_message(self, _format, *_arguments):
                 pass
@@ -1594,6 +1745,70 @@ raise SystemExit(0 if not issues else 2)
         )
         self.assertNotIn("fixture-secret", result.stdout + result.stderr)
 
+    def test_accept_settles_when_server_responds_before_status_write(self):
+        try:
+            server, thread, requests, session_id = self._run_accept_server(
+                respond_before_write=True
+            )
+        except PermissionError:
+            self.skipTest("loopback bind unavailable in this sandbox")
+        else:
+            try:
+                result = self.run_dispatch("accept", role="deploy")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [session_id])
+        self.assertEqual(
+            [entry[2]["input"] for entry in requests],
+            ["deployment warm-up", "/persona mode-b", "/persona public"],
+        )
+
+    def test_accept_settles_across_torn_intermediate_switch_reread(self):
+        module = load_dispatch_module("luca_dispatch_accept_torn_reread")
+        try:
+            server, thread, requests, session_id = self._run_accept_server(
+                suppress_switch_status_write=True
+            )
+        except PermissionError:
+            self.skipTest("loopback bind unavailable in this sandbox")
+        else:
+            try:
+                sleeps = 0
+
+                def settle_sleep(_seconds):
+                    nonlocal sleeps
+                    sleeps += 1
+                    status_path = self.install / "state/status.json"
+                    if sleeps == 1:
+                        status_path.write_bytes(b"{")
+                    elif sleeps == 2:
+                        self._write_accept_status("mode-b")
+
+                config = self.root / "home/admin/.config/caty-gateway/luca-hermes-api.env"
+                with mock.patch.object(module._time, "sleep", side_effect=settle_sleep):
+                    output = module._accept(
+                        self.install, config, self.root / "backups", "standard"
+                    )
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+        self.assertEqual(json.loads(output), [session_id])
+        self.assertEqual(sleeps, 2)
+        self.assertEqual(
+            json.loads((self.install / "state/status.json").read_text(encoding="utf-8"))[
+                "mode"
+            ],
+            "public",
+        )
+        self.assertEqual(
+            [entry[2]["input"] for entry in requests],
+            ["deployment warm-up", "/persona mode-b", "/persona public"],
+        )
+
     def test_accept_transport_disables_proxies_and_redirects(self):
         module = load_dispatch_module("luca_dispatch_transport")
         response = mock.MagicMock()
@@ -1640,6 +1855,48 @@ raise SystemExit(0 if not issues else 2)
                     "fixture-secret", 4321, "fixed-conversation", "deployment warm-up"
                 )
 
+    def test_accept_transport_slow_server_raises_timeout_subclass(self):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(handler):
+                length = int(handler.headers["Content-Length"])
+                handler.rfile.read(length)
+                time.sleep(0.2)
+                try:
+                    handler.send_response(200)
+                    handler.send_header(
+                        "X-Hermes-Session-Id",
+                        "12345678-1234-1234-1234-123456789abc",
+                    )
+                    handler.send_header("Content-Length", "2")
+                    handler.end_headers()
+                    handler.wfile.write(b"{}")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def log_message(self, _format, *_arguments):
+                pass
+
+        try:
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        except PermissionError:
+            self.skipTest("loopback bind unavailable in this sandbox")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        module = load_dispatch_module("luca_dispatch_accept_slow_server")
+        try:
+            with mock.patch.object(module, "_ACCEPT_TIMEOUT_SECONDS", 0.05):
+                with self.assertRaises(module._AcceptRequestTimeout):
+                    module._send_accept_turn(
+                        "fixture-secret",
+                        server.server_port,
+                        "fixed-conversation",
+                        "/persona mode-b",
+                    )
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
     def test_accept_config_enforces_0o077_permission_gate(self):
         config = self.root / "home/admin/.config/caty-gateway/luca-hermes-api.env"
         config.parent.mkdir(parents=True)
@@ -1650,6 +1907,245 @@ raise SystemExit(0 if not issues else 2)
             module._accept_config(config)
         config.chmod(0o600)
         self.assertEqual(module._accept_config(config), ("fixture-secret", 1))
+
+    def _write_accept_status(self, mode, *, block_bytes=None, block_sha256=None):
+        if mode == "public":
+            expected_bytes = 0
+            expected_sha256 = hashlib.sha256(b"").hexdigest()
+        else:
+            manifest = json.loads(
+                (self.build / "manifest.json").read_text(encoding="utf-8")
+            )
+            metadata = manifest["modes"][mode]
+            expected_bytes = metadata["bytes"]
+            expected_sha256 = metadata["sha256"]
+        state = self.install / "state"
+        state.mkdir(exist_ok=True)
+        (state / "status.json").write_text(
+            json.dumps(
+                {
+                    "mode": mode,
+                    "block_bytes": expected_bytes if block_bytes is None else block_bytes,
+                    "block_sha256": (
+                        expected_sha256 if block_sha256 is None else block_sha256
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _write_accept_config(self):
+        config = self.root / "home/admin/.config/caty-gateway/luca-hermes-api.env"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            "API_SERVER_KEY=fixture-secret\nAPI_SERVER_PORT=1\n",
+            encoding="utf-8",
+        )
+        config.chmod(0o600)
+        return config
+
+    def test_accept_wrong_mode_and_metadata_reports_switch_not_applied(self):
+        module = load_dispatch_module("luca_dispatch_accept_not_applied")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+
+        def send_turn(_token, _port, _conversation, utterance):
+            if utterance == "/persona public":
+                self._write_accept_status("public")
+            return "11111111-1111-1111-1111-111111111111"
+
+        with mock.patch.object(module, "_ASSERT_MODE_SETTLE_DELAY_SECONDS", 0):
+            with mock.patch.object(module, "_send_accept_turn", side_effect=send_turn):
+                with self.assertRaises(module.DispatchError) as caught:
+                    module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-switch-not-applied")
+
+    def test_accept_right_mode_wrong_metadata_reports_mismatch(self):
+        module = load_dispatch_module("luca_dispatch_accept_metadata_mismatch")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+
+        def send_turn(_token, _port, _conversation, utterance):
+            if utterance == "/persona mode-b":
+                self._write_accept_status(
+                    "mode-b",
+                    block_bytes=1,
+                    block_sha256="0" * 64,
+                )
+            elif utterance == "/persona public":
+                self._write_accept_status("public")
+            return "11111111-1111-1111-1111-111111111111"
+
+        with mock.patch.object(module, "_ASSERT_MODE_SETTLE_DELAY_SECONDS", 0):
+            with mock.patch.object(module, "_send_accept_turn", side_effect=send_turn):
+                with self.assertRaises(module.DispatchError) as caught:
+                    module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(
+            caught.exception.reason_code, "accept-switch-metadata-mismatch"
+        )
+
+    def test_accept_switch_non_timeout_failure_reports_request_failed(self):
+        module = load_dispatch_module("luca_dispatch_accept_request_failed")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+
+        def send_turn(_token, _port, _conversation, utterance):
+            if utterance == "/persona mode-b":
+                raise module.DispatchError("accept request failed")
+            if utterance == "/persona public":
+                self._write_accept_status("public")
+            return "11111111-1111-1111-1111-111111111111"
+
+        with mock.patch.object(module, "_send_accept_turn", side_effect=send_turn):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-switch-request-failed")
+
+    def test_accept_switch_timeout_reports_request_timeout(self):
+        module = load_dispatch_module("luca_dispatch_accept_request_timeout")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+
+        def send_turn(_token, _port, _conversation, utterance):
+            if utterance == "/persona mode-b":
+                raise module._AcceptRequestTimeout("accept request failed")
+            if utterance == "/persona public":
+                self._write_accept_status("public")
+            return "11111111-1111-1111-1111-111111111111"
+
+        with mock.patch.object(module, "_send_accept_turn", side_effect=send_turn):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-switch-request-timeout")
+
+    def test_accept_warmup_failure_rejects_before_switch_turn(self):
+        module = load_dispatch_module("luca_dispatch_accept_warmup_failed")
+        self._write_accept_status("public")
+        self._write_accept_config()
+        calls = []
+
+        def send_turn(_token, _port, _conversation, utterance):
+            calls.append(utterance)
+            raise module.DispatchError("accept request failed")
+
+        stderr = io.StringIO()
+        stdout_bytes = io.BytesIO()
+        stdout = io.TextIOWrapper(stdout_bytes, encoding="utf-8")
+        environment = {
+            "SSH_ORIGINAL_COMMAND": "accept",
+            "PGL_LUCA_DISPATCH_TESTING": "1",
+            "PGL_LUCA_DISPATCH_TEST_ROOT": str(self.root),
+        }
+        with mock.patch.object(module, "_send_accept_turn", side_effect=send_turn):
+            with mock.patch.object(module.sys, "argv", [str(DISPATCH), "deploy"]):
+                with mock.patch.object(module.os, "environ", environment):
+                    with mock.patch.object(module.sys, "stderr", stderr):
+                        with mock.patch.object(module.sys, "stdout", stdout):
+                            returncode = module.main()
+                            stdout.flush()
+        self.assertEqual(returncode, 1)
+        self.assertEqual(stderr.getvalue(), reason_line("accept-warmup-failed"))
+        self.assertEqual(stdout_bytes.getvalue(), b"")
+        self.assertEqual(calls, ["deployment warm-up"])
+
+    def test_accept_switch_failure_after_runtime_write_still_restores(self):
+        module = load_dispatch_module("luca_dispatch_accept_presend_latch")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        calls = []
+
+        def send_turn(_token, _port, _conversation, utterance):
+            calls.append(utterance)
+            if utterance == "/persona mode-b":
+                self._write_accept_status("mode-b")
+                raise module.DispatchError("accept request failed")
+            if utterance == "/persona public":
+                self._write_accept_status("public")
+            return "11111111-1111-1111-1111-111111111111"
+
+        with mock.patch.object(module, "_send_accept_turn", side_effect=send_turn):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-switch-request-failed")
+        self.assertEqual(
+            calls,
+            ["deployment warm-up", "/persona mode-b", "/persona public"],
+        )
+        self.assertEqual(
+            json.loads((self.install / "state/status.json").read_text(encoding="utf-8"))[
+                "mode"
+            ],
+            "public",
+        )
+
+    def test_accept_nonconvergent_restore_overrides_primary_switch_code(self):
+        module = load_dispatch_module("luca_dispatch_accept_restore_precedence")
+        self._write_accept_status("public")
+        self._write_accept_config()
+        calls = []
+
+        def send_turn(_token, _port, _conversation, utterance):
+            calls.append(utterance)
+            if utterance == "/persona mode-b":
+                self._write_accept_status("mode-b")
+                raise module.DispatchError("accept request failed")
+            if utterance == "/persona public":
+                raise module.DispatchError("accept request failed")
+            return "11111111-1111-1111-1111-111111111111"
+
+        stderr = io.StringIO()
+        environment = {
+            "SSH_ORIGINAL_COMMAND": "accept",
+            "PGL_LUCA_DISPATCH_TESTING": "1",
+            "PGL_LUCA_DISPATCH_TEST_ROOT": str(self.root),
+        }
+        with mock.patch.object(module, "_send_accept_turn", side_effect=send_turn):
+            with mock.patch.object(module.sys, "argv", [str(DISPATCH), "deploy"]):
+                with mock.patch.object(module.os, "environ", environment):
+                    with mock.patch.object(module.sys, "stderr", stderr):
+                        self.assertEqual(module.main(), 1)
+        self.assertEqual(stderr.getvalue(), reason_line("accept-restore-failed"))
+        self.assertEqual(calls.count("/persona public"), 2)
+
+    def test_accept_primary_switch_code_survives_restore_retry(self):
+        module = load_dispatch_module("luca_dispatch_accept_primary_survives")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        restore_attempts = 0
+
+        def send_turn(_token, _port, _conversation, utterance):
+            nonlocal restore_attempts
+            if utterance == "/persona mode-b":
+                raise module.DispatchError("accept request failed")
+            if utterance == "/persona public":
+                restore_attempts += 1
+                if restore_attempts == 1:
+                    raise module.DispatchError("accept request failed")
+                self._write_accept_status("public")
+            return "11111111-1111-1111-1111-111111111111"
+
+        with mock.patch.object(module, "_send_accept_turn", side_effect=send_turn):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-switch-request-failed")
+        self.assertEqual(restore_attempts, 2)
+
+    def test_accept_unreadable_switch_status_reports_switch_failed(self):
+        module = load_dispatch_module("luca_dispatch_accept_status_unreadable")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+
+        def send_turn(_token, _port, _conversation, utterance):
+            if utterance == "/persona mode-b":
+                (self.install / "state/status.json").unlink()
+            elif utterance == "/persona public":
+                self._write_accept_status("public")
+            return "11111111-1111-1111-1111-111111111111"
+
+        with mock.patch.object(module, "_send_accept_turn", side_effect=send_turn):
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-switch-failed")
 
     def test_accept_returns_every_distinct_generated_session_uuid(self):
         module = load_dispatch_module("luca_dispatch_multi_session")
@@ -1840,6 +2336,7 @@ raise SystemExit(0 if not issues else 2)
                     "standard",
                 )
         self.assertIn("runtime mode unknown", str(caught.exception))
+        self.assertEqual(caught.exception.reason_code, "accept-restore-failed")
         self.assertEqual(
             calls,
             [
@@ -1920,6 +2417,7 @@ raise SystemExit(0 if not issues else 2)
                     "standard",
                 )
         self.assertEqual(str(caught.exception), "acceptance failed")
+        self.assertEqual(caught.exception.reason_code, "accept-restore-retried")
         self.assertEqual(
             calls,
             [
@@ -1931,6 +2429,92 @@ raise SystemExit(0 if not issues else 2)
         )
         status = json.loads((state / "status.json").read_text(encoding="utf-8"))
         self.assertEqual(status["mode"], "public")
+
+    def test_dispatch_error_rejects_unknown_reason_code_at_construction(self):
+        module = load_dispatch_module("luca_dispatch_reason_validation")
+        with self.assertRaises(ValueError):
+            module.DispatchError(reason_code="accept-typo-not-in-vocabulary")
+
+    def test_main_ignores_reason_attributes_on_foreign_exceptions(self):
+        module = load_dispatch_module("luca_dispatch_foreign_reason")
+
+        class ForeignError(Exception):
+            reason = "accept-switch-not-applied"
+            reason_code = "accept-switch-not-applied"
+
+        stderr = io.StringIO()
+        with mock.patch.object(module, "_parse_request", side_effect=ForeignError()):
+            with mock.patch.object(module.sys, "stderr", stderr):
+                self.assertEqual(module.main(), 1)
+        self.assertEqual(stderr.getvalue(), ERROR_LINE)
+
+    def test_main_rejects_str_subclass_reason_code_at_emission(self):
+        module = load_dispatch_module("luca_dispatch_str_subclass_reason")
+
+        class ReasonCode(str):
+            pass
+
+        exception = module.DispatchError(
+            reason_code=ReasonCode("accept-switch-not-applied")
+        )
+        stderr = io.StringIO()
+        with mock.patch.object(module, "_parse_request", side_effect=exception):
+            with mock.patch.object(module.sys, "stderr", stderr):
+                self.assertEqual(module.main(), 1)
+        self.assertEqual(stderr.getvalue(), ERROR_LINE)
+
+    def test_every_emitted_failure_is_one_literal_line_and_stdout_is_empty(self):
+        module = load_dispatch_module("luca_dispatch_literal_emission")
+        allowed_lines = {ERROR_LINE, *module._REASON_LINES.values()}
+
+        class ForeignError(Exception):
+            reason_code = "restart-command-failed"
+
+        failures = [ForeignError(), module.DispatchError()]
+        failures.extend(
+            module.DispatchError(reason_code=code) for code in module._REASON_CODES
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__, reason=getattr(failure, "reason_code", None)):
+                stderr = io.StringIO()
+                stdout_bytes = io.BytesIO()
+                stdout = io.TextIOWrapper(stdout_bytes, encoding="utf-8")
+                with mock.patch.object(module, "_parse_request", side_effect=failure):
+                    with mock.patch.object(module.sys, "stderr", stderr):
+                        with mock.patch.object(module.sys, "stdout", stdout):
+                            self.assertEqual(module.main(), 1)
+                            stdout.flush()
+                self.assertIn(stderr.getvalue(), allowed_lines)
+                self.assertEqual(stderr.getvalue().count("\n"), 1)
+                self.assertEqual(stdout_bytes.getvalue(), b"")
+
+    def test_reason_vocabulary_has_closed_safe_shape(self):
+        module = load_dispatch_module("luca_dispatch_reason_vocabulary")
+        self.assertEqual(
+            module._REASON_CODES,
+            {
+                "accept-warmup-failed",
+                "accept-switch-request-failed",
+                "accept-switch-request-timeout",
+                "accept-switch-not-applied",
+                "accept-switch-metadata-mismatch",
+                "accept-switch-failed",
+                "accept-restore-failed",
+                "accept-restore-retried",
+                "restart-command-failed",
+                "restart-command-timeout",
+                "restart-units-not-active",
+                "restart-verification-failed",
+            },
+        )
+        self.assertEqual(module._REASON_LINES.keys(), module._REASON_CODES)
+        for code in module._REASON_CODES:
+            self.assertIsNotNone(re.fullmatch(r"[a-z][a-z0-9-]{1,40}", code))
+            self.assertTrue(code.isascii())
+        for line in module._REASON_LINES.values():
+            self.assertTrue(line.endswith("\n"))
+            self.assertEqual(line.count("\n"), 1)
+            self.assertNotIn("\r", line)
 
     def test_run_transfer_receiver_times_out_after_stderr_closes(self):
         self.rsync_path.write_text(

@@ -1630,7 +1630,12 @@ class LucaNightlyDeployTests(unittest.TestCase):
             )
             self.assertEqual(
                 (fixture.install / "systemctl.argv").read_text().splitlines(),
-                ["--user", "restart", "hermes-gateway-luca", "hermes-api-luca"],
+                ["--user restart hermes-gateway-luca hermes-api-luca"]
+                + [
+                    f"--user is-active --quiet {unit}"
+                    for _sample in range(3)
+                    for unit in ("hermes-gateway-luca", "hermes-api-luca")
+                ],
             )
         finally:
             if server is not None:
