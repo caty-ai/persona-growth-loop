@@ -1149,7 +1149,7 @@ if exit_path.is_file():
 
     def test_deploy_transfer_rejects_post_transfer_size_over_cap(self):
         self.rsync_path.write_text(
-            "#!/usr/bin/python3\n"
+            "#!/usr/bin/env python3\n"
             "import sys\n"
             "from pathlib import Path\n"
             "import os\n"
