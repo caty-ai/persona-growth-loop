@@ -71,6 +71,8 @@ FROZEN_LUCA_PLACEHOLDER_DECLARATIONS = frozenset(
 )
 _CONTENT_HASH = re.compile(r"^[0-9a-f]{64}$")
 _JST = timezone(timedelta(hours=9))
+_COMMAND_TIMEOUT_SECONDS = 300
+_ACCEPT_COMMAND_TIMEOUT_SECONDS = 380
 
 
 CommandRunner = Callable[
@@ -548,16 +550,25 @@ _UniqueSafeLoader.add_constructor(
 def _run_command(
     command: Sequence[str], cwd: Path
 ) -> subprocess.CompletedProcess[str]:
+    arguments = tuple(command)
+    timeout = (
+        _ACCEPT_COMMAND_TIMEOUT_SECONDS
+        if len(arguments) >= 5
+        and arguments[0] == "ssh"
+        and arguments[1] == "-i"
+        and arguments[4:] in {("accept",), ("accept", "deletion")}
+        else _COMMAND_TIMEOUT_SECONDS
+    )
     try:
         return subprocess.run(
-            list(command),
+            list(arguments),
             cwd=cwd,
             text=True,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
-            timeout=300,
+            timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"command unavailable: {command[0]}: {exc}") from exc

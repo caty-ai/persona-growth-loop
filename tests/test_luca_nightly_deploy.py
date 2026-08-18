@@ -1623,9 +1623,9 @@ class LucaNightlyDeployTests(unittest.TestCase):
                 clock=lambda: TIMESTAMP,
                 window_id_factory=lambda: WINDOW_UUID,
             )
-            self.assertEqual(result.session_ids, (expected_session,))
+            self.assertEqual(result.session_ids, tuple(sorted(expected_session)))
             self.assertEqual(
-                [request[2]["input"] for request in requests],
+                [request["body"]["input"] for request in requests],
                 ["deployment warm-up", "/persona mode-b", "/persona public"],
             )
             self.assertEqual(
@@ -1639,10 +1639,7 @@ class LucaNightlyDeployTests(unittest.TestCase):
             )
         finally:
             if server is not None:
-                server.shutdown()
-                if thread is not None:
-                    thread.join(timeout=5)
-                server.server_close()
+                fixture._stop_accept_server(server, thread, requests)
             fixture.tearDown()
 
 

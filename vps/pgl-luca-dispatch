@@ -96,6 +96,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
+_TURN_KEY = re.compile(r"^[0-9A-Za-z:._-]{1,256}$")
 _BACKUP_GENERATION = re.compile(
     r"^luca-[0-9]{8}T[0-9]{12}Z-[0-9a-f]{8}$"
 )
@@ -128,14 +129,16 @@ _RESTART_TIMEOUT_SECONDS = 240
 _RESTART_VERIFY_SAMPLES = 3
 _RESTART_VERIFY_DWELL_SECONDS = 2
 _RESTART_VERIFY_TIMEOUT_SECONDS = 5
-# Four accept turns at 60s each plus the two 1s switch settle retries stay
-# below growthlane/deploy.py _run_command's 300s SSH cap with roughly 50s of
-# margin; any future raise to this accept budget must move that client ceiling
-# together.
-_ACCEPT_TIMEOUT_SECONDS = 60
+_ACCEPT_OPEN_TIMEOUT_SECONDS = 15
+_ACCEPT_WARMUP_WINDOW_SECONDS = 60
+_ACCEPT_SWITCH_WINDOW_SECONDS = 45
+_ACCEPT_RESTORE_WINDOW_SECONDS = 45
+_ACCEPT_POLL_INTERVAL_SECONDS = 1
+_ACCEPT_DISCONNECT_HORIZON_SECONDS = 75
+_ACCEPT_RESTORE_RESERVED_SECONDS = 135
+_ACCEPT_DEADLINE_SECONDS = 345
 _ACCEPT_RESTORE_RETRIES = 2
-_ASSERT_MODE_SETTLE_RETRIES = 2
-_ASSERT_MODE_SETTLE_DELAY_SECONDS = 1
+_STATUS_OUTPUT_LIMIT = 64 * 1024
 _DOCTOR_OUTPUT_LIMIT = 1024 * 1024
 _RSYNC_VERSION_TIMEOUT_SECONDS = 10
 _RSYNC_VERSION_OUTPUT_LIMIT = 16 * 1024
@@ -213,7 +216,15 @@ class DispatchError(Exception):
 
 
 class _AcceptRequestTimeout(DispatchError):
-    """The fixed acceptance request exceeded its bounded timeout."""
+    """Acceptance did not receive response headers within its open timeout."""
+
+
+class _AcceptDeadlineExpired(DispatchError):
+    """The acceptance-wide deadline left no time for the current step."""
+
+
+class _AcceptOracleTimeout(DispatchError):
+    """A held acceptance stream closed without observing its owned persist."""
 
 
 class _FixedCommandTimeout(DispatchError):
@@ -254,6 +265,37 @@ def _read_regular(path: Path) -> bytes:
             if not chunk:
                 return b"".join(chunks)
             chunks.append(chunk)
+    except OSError as exc:
+        raise DispatchError("file read failed") from exc
+    finally:
+        os.close(fd)
+
+
+def _read_regular_limited(path: Path, limit: int) -> bytes:
+    """Read at most *limit* bytes from a regular file without following it."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise DispatchError("file unavailable") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            _reject("not regular")
+        chunks: list[bytes] = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(fd, min(64 * 1024, remaining))
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        _reject("file too large")
     except OSError as exc:
         raise DispatchError("file read failed") from exc
     finally:
@@ -1557,9 +1599,26 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
 
 
-def _send_accept_turn(token: str, port: int, conversation: str, utterance: str) -> str:
+def _close_accept_stream(response: Any) -> None:
+    try:
+        response.close()
+    except BaseException:
+        pass
+
+
+def _open_accept_stream(
+    token: str,
+    port: int,
+    conversation: str,
+    utterance: str,
+    deadline: float,
+) -> tuple[Any, str]:
+    remaining = deadline - _time.monotonic()
+    if remaining <= 0:
+        raise _AcceptDeadlineExpired("accept deadline expired")
     body = json.dumps(
-        {"input": utterance, "conversation": conversation}, separators=(",", ":")
+        {"input": utterance, "conversation": conversation, "stream": True},
+        separators=(",", ":"),
     ).encode("utf-8")
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/v1/responses",
@@ -1567,27 +1626,49 @@ def _send_accept_turn(token: str, port: int, conversation: str, utterance: str) 
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
     )
+    response = None
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
-        with opener.open(request, timeout=_ACCEPT_TIMEOUT_SECONDS) as response:
-            session_values = response.headers.get_all("X-Hermes-Session-Id") or []
-            if len(response.read(_DOCTOR_OUTPUT_LIMIT + 1)) > _DOCTOR_OUTPUT_LIMIT:
-                _reject("accept response too large")
+        response = opener.open(
+            request, timeout=min(_ACCEPT_OPEN_TIMEOUT_SECONDS, remaining)
+        )
+        if _time.monotonic() >= deadline:
+            _close_accept_stream(response)
+            response = None
+            raise _AcceptDeadlineExpired("accept deadline expired")
+        session_values = response.headers.get_all("X-Hermes-Session-Id") or []
+        if (
+            len(session_values) != 1
+            or not isinstance(session_values[0], str)
+            or _UUID.fullmatch(session_values[0]) is None
+        ):
+            _close_accept_stream(response)
+            response = None
+            _reject("accept session invalid")
+        return response, session_values[0]
+    except urllib.error.HTTPError as exc:
+        _close_accept_stream(exc)
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            raise _AcceptRequestTimeout("accept request failed") from exc
+        raise DispatchError("accept request failed") from exc
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, (TimeoutError, socket.timeout)):
             raise _AcceptRequestTimeout("accept request failed") from exc
         raise DispatchError("accept request failed") from exc
     except (TimeoutError, socket.timeout) as exc:
         raise _AcceptRequestTimeout("accept request failed") from exc
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        if response is not None:
+            _close_accept_stream(response)
         raise DispatchError("accept request failed") from exc
-    if len(session_values) != 1 or _UUID.fullmatch(session_values[0]) is None:
-        _reject("accept session invalid")
-    return session_values[0]
+    except BaseException:
+        if response is not None:
+            _close_accept_stream(response)
+        raise
 
 
 def _status(path: Path) -> dict[str, Any]:
-    value = _decode_json(_read_regular(path))
+    value = _decode_json(_read_regular_limited(path, _STATUS_OUTPUT_LIMIT))
     if not isinstance(value, dict):
         _reject("status invalid")
     mode = value.get("mode")
@@ -1599,7 +1680,19 @@ def _status(path: Path) -> dict[str, Any]:
         _reject("status bytes invalid")
     if not isinstance(block_sha256, str) or _SHA256.fullmatch(block_sha256) is None:
         _reject("status hash invalid")
+    turn_key = value.get("turn_key")
+    if turn_key is not None and (
+        not isinstance(turn_key, str) or _TURN_KEY.fullmatch(turn_key) is None
+    ):
+        _reject("status turn key invalid")
     return value
+
+
+def _owned(status: dict[str, Any], session_id: str) -> bool:
+    turn_key = status.get("turn_key")
+    return isinstance(turn_key, str) and (
+        turn_key == session_id or turn_key.startswith(session_id + ":")
+    )
 
 
 def _expected_mode(manifest_path: Path, mode: str) -> tuple[int, str]:
@@ -1613,33 +1706,63 @@ def _expected_mode(manifest_path: Path, mode: str) -> tuple[int, str]:
 
 
 def _assert_mode(
-    status_path: Path, manifest_path: Path, mode: str, *, switch: bool
-) -> None:
-    value = _status(status_path)
+    status_path: Path,
+    manifest_path: Path,
+    mode: str,
+    session_id: str,
+    poll_deadline: float,
+    *,
+    switch: bool,
+) -> dict[str, Any]:
     expected_bytes, expected_hash = _expected_mode(manifest_path, mode)
-    retries = _ASSERT_MODE_SETTLE_RETRIES if switch else 0
-    for retry in range(retries + 1):
-        if (
-            value["mode"] == mode
-            and value["block_bytes"] == expected_bytes
-            and value["block_sha256"] == expected_hash
-        ):
-            return
-        if retry < retries:
-            _time.sleep(_ASSERT_MODE_SETTLE_DELAY_SECONDS)
-            try:
-                value = _status(status_path)
-            except DispatchError:
-                pass
+    value: dict[str, Any] | None = None
+    while True:
+        remaining = poll_deadline - _time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            current = _status(status_path)
+        except DispatchError:
+            current = None
+        if current is not None:
+            value = current
+            if (
+                _owned(current, session_id)
+                and current["mode"] == mode
+                and current["block_bytes"] == expected_bytes
+                and current["block_sha256"] == expected_hash
+            ):
+                return current
+        _time.sleep(min(_ACCEPT_POLL_INTERVAL_SECONDS, remaining))
     if switch:
-        if value["mode"] != mode:
+        if value is None:
+            raise _AcceptOracleTimeout(
+                "accept mode mismatch", reason_code="accept-switch-failed"
+            )
+        if not _owned(value, session_id) or value["mode"] != mode:
             raise DispatchError(
                 "accept mode mismatch", reason_code="accept-switch-not-applied"
             )
-        raise DispatchError(
+        raise _AcceptOracleTimeout(
             "accept mode mismatch", reason_code="accept-switch-metadata-mismatch"
         )
-    _reject("accept mode mismatch")
+    raise _AcceptOracleTimeout("accept mode mismatch")
+
+
+def _await_owned_status(
+    status_path: Path, session_id: str, poll_deadline: float
+) -> dict[str, Any]:
+    while True:
+        remaining = poll_deadline - _time.monotonic()
+        if remaining <= 0:
+            raise _AcceptOracleTimeout("accept warm-up oracle expired")
+        try:
+            value = _status(status_path)
+        except DispatchError:
+            value = None
+        if value is not None and _owned(value, session_id):
+            return value
+        _time.sleep(min(_ACCEPT_POLL_INTERVAL_SECONDS, remaining))
 
 
 def _render_file_set(pack_root: Path) -> set[str]:
@@ -1662,22 +1785,40 @@ def _assert_deletion_subset(install_root: Path, backups_root: Path) -> None:
 
 
 def _accept(install_root: Path, config_path: Path, backups_root: Path, kind: str) -> bytes:
+    deadline = _time.monotonic() + _ACCEPT_DEADLINE_SECONDS
     if kind == "deletion":
         _assert_deletion_subset(install_root, backups_root)
     token, port = _accept_config(config_path)
     status_path = install_root / "state/status.json"
     manifest_path = install_root / "build/manifest.json"
-    pre_mode = _status(status_path)["mode"]
-    conversation = f"persona-deploy-verify-{uuid.uuid4()}"
+    _status(status_path)
     sessions: list[str] = []
     primary_error: BaseException | None = None
     primary_code: str | None = None
     restore_code: str | None = None
     mode_changed = False
     restore_attempt_failed = False
+    zombie_deadlines: list[float] = []
+
+    warmup_response = None
     try:
-        sessions.append(_send_accept_turn(token, port, conversation, "deployment warm-up"))
-    except _AcceptRequestTimeout as exc:
+        warmup_response, warmup_session = _open_accept_stream(
+            token,
+            port,
+            f"persona-deploy-verify-{uuid.uuid4()}",
+            "deployment warm-up",
+            deadline,
+        )
+        sessions.append(warmup_session)
+        warmup_status = _await_owned_status(
+            status_path,
+            warmup_session,
+            min(
+                deadline,
+                _time.monotonic() + _ACCEPT_WARMUP_WINDOW_SECONDS,
+            ),
+        )
+    except (_AcceptDeadlineExpired, _AcceptOracleTimeout) as exc:
         raise DispatchError(
             "acceptance failed", reason_code="accept-warmup-timeout"
         ) from exc
@@ -1685,20 +1826,45 @@ def _accept(install_root: Path, config_path: Path, backups_root: Path, kind: str
         raise DispatchError(
             "acceptance failed", reason_code="accept-warmup-failed"
         ) from exc
-    switch_request_complete = False
+    finally:
+        if warmup_response is not None:
+            _close_accept_stream(warmup_response)
+
+    pre_mode = warmup_status["mode"]
+    if pre_mode == _VERIFY_MODE:
+        raise DispatchError("acceptance failed", reason_code="accept-switch-failed")
+
+    switch_response = None
+    switch_observed = False
     try:
         mode_changed = True
-        switch_session = _send_accept_turn(
-            token, port, conversation, f"/persona {_VERIFY_MODE}"
+        switch_response, switch_session = _open_accept_stream(
+            token,
+            port,
+            f"persona-deploy-verify-{uuid.uuid4()}",
+            f"/persona {_VERIFY_MODE}",
+            deadline,
         )
-        switch_request_complete = True
         sessions.append(switch_session)
-        _assert_mode(status_path, manifest_path, _VERIFY_MODE, switch=True)
+        _assert_mode(
+            status_path,
+            manifest_path,
+            _VERIFY_MODE,
+            switch_session,
+            min(
+                _time.monotonic() + _ACCEPT_SWITCH_WINDOW_SECONDS,
+                deadline - _ACCEPT_RESTORE_RESERVED_SECONDS,
+            ),
+            switch=True,
+        )
+        switch_observed = True
     except BaseException as exc:
         primary_error = exc
         code = exc.reason_code if isinstance(exc, DispatchError) else None
-        if not switch_request_complete:
-            if isinstance(exc, _AcceptRequestTimeout):
+        if switch_response is None:
+            if isinstance(exc, _AcceptDeadlineExpired):
+                primary_code = "accept-switch-failed"
+            elif isinstance(exc, _AcceptRequestTimeout):
                 primary_code = "accept-switch-request-timeout"
             else:
                 primary_code = "accept-switch-request-failed"
@@ -1706,19 +1872,78 @@ def _accept(install_root: Path, config_path: Path, backups_root: Path, kind: str
             primary_code = code
         else:
             primary_code = "accept-switch-failed"
+    finally:
+        if switch_response is not None:
+            _close_accept_stream(switch_response)
+            close_time = _time.monotonic()
+            if not switch_observed:
+                zombie_deadlines.append(
+                    close_time + _ACCEPT_DISCONNECT_HORIZON_SECONDS
+                )
+
     restore_error: BaseException | None = None
     if mode_changed:
-        for _attempt in range(_ACCEPT_RESTORE_RETRIES):
+        for attempt in range(_ACCEPT_RESTORE_RETRIES):
+            restore_response = None
+            restore_observed = False
+            opened_after_horizons = False
             try:
-                sessions.append(_send_accept_turn(token, port, conversation, f"/persona {pre_mode}"))
-                _assert_mode(status_path, manifest_path, pre_mode, switch=False)
-                restore_error = None
-                restore_code = None
-                break
+                open_started = _time.monotonic()
+                full_attempt = (
+                    _ACCEPT_OPEN_TIMEOUT_SECONDS + _ACCEPT_RESTORE_WINDOW_SECONDS
+                )
+                opened_after_horizons = not zombie_deadlines or (
+                    open_started >= max(zombie_deadlines)
+                    and deadline - open_started >= full_attempt
+                )
+                restore_response, restore_session = _open_accept_stream(
+                    token,
+                    port,
+                    f"persona-deploy-verify-{uuid.uuid4()}",
+                    f"/persona {pre_mode}",
+                    deadline,
+                )
+                sessions.append(restore_session)
+                _assert_mode(
+                    status_path,
+                    manifest_path,
+                    pre_mode,
+                    restore_session,
+                    min(
+                        deadline,
+                        _time.monotonic() + _ACCEPT_RESTORE_WINDOW_SECONDS,
+                    ),
+                    switch=False,
+                )
+                restore_observed = True
+                if opened_after_horizons:
+                    restore_error = None
+                    restore_code = None
+                    break
+                restore_attempt_failed = True
+                restore_error = DispatchError("accept mode mismatch")
+                restore_code = "accept-restore-failed"
             except BaseException as exc:
                 restore_attempt_failed = True
                 restore_error = exc
                 restore_code = "accept-restore-failed"
+            finally:
+                if restore_response is not None:
+                    _close_accept_stream(restore_response)
+                    close_time = _time.monotonic()
+                    if not restore_observed:
+                        zombie_deadlines.append(
+                            close_time + _ACCEPT_DISCONNECT_HORIZON_SECONDS
+                        )
+
+            if attempt + 1 < _ACCEPT_RESTORE_RETRIES and zombie_deadlines:
+                now = _time.monotonic()
+                horizon_wait = max(0.0, max(zombie_deadlines) - now)
+                next_full_attempt = (
+                    _ACCEPT_OPEN_TIMEOUT_SECONDS + _ACCEPT_RESTORE_WINDOW_SECONDS
+                )
+                if deadline - now >= horizon_wait + next_full_attempt:
+                    _time.sleep(min(horizon_wait, max(0.0, deadline - now)))
     if mode_changed and restore_error is not None:
         raise DispatchError(
             "acceptance failed with runtime mode unknown",
