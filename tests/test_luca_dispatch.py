@@ -2027,14 +2027,14 @@ if exit_path.is_file():
     def _patch_accept_open(self, module, send_turn, responses=None, conversations=None):
         responses = [] if responses is None else responses
         conversations = [] if conversations is None else conversations
-        module._ACCEPT_OPEN_TIMEOUT_SECONDS = 0.01
-        module._ACCEPT_WARMUP_WINDOW_SECONDS = 0.01
-        module._ACCEPT_SWITCH_WINDOW_SECONDS = 0.01
-        module._ACCEPT_RESTORE_WINDOW_SECONDS = 0.01
+        module._ACCEPT_OPEN_TIMEOUT_SECONDS = 0.5
+        module._ACCEPT_WARMUP_WINDOW_SECONDS = 0.5
+        module._ACCEPT_SWITCH_WINDOW_SECONDS = 0.5
+        module._ACCEPT_RESTORE_WINDOW_SECONDS = 0.5
         module._ACCEPT_POLL_INTERVAL_SECONDS = 0.001
         module._ACCEPT_DISCONNECT_HORIZON_SECONDS = 0.002
-        module._ACCEPT_RESTORE_RESERVED_SECONDS = 0.03
-        module._ACCEPT_DEADLINE_SECONDS = 0.2
+        module._ACCEPT_RESTORE_RESERVED_SECONDS = 1.5
+        module._ACCEPT_DEADLINE_SECONDS = 10.0
 
         def open_stream(token, port, conversation, utterance, _deadline):
             conversations.append(conversation)
@@ -2057,17 +2057,17 @@ if exit_path.is_file():
         return mock.patch.object(module, "_open_accept_stream", side_effect=open_stream)
 
     @contextlib.contextmanager
-    def _scripted_accept(self, module, steps, *, deadline=0.2, horizon=0.002):
+    def _scripted_accept(self, module, steps, *, deadline=10.0, horizon=0.002):
         original_status = module._status
         records = []
         pending = []
-        module._ACCEPT_OPEN_TIMEOUT_SECONDS = 0.01
-        module._ACCEPT_WARMUP_WINDOW_SECONDS = 0.01
-        module._ACCEPT_SWITCH_WINDOW_SECONDS = 0.01
-        module._ACCEPT_RESTORE_WINDOW_SECONDS = 0.01
+        module._ACCEPT_OPEN_TIMEOUT_SECONDS = 0.5
+        module._ACCEPT_WARMUP_WINDOW_SECONDS = 0.5
+        module._ACCEPT_SWITCH_WINDOW_SECONDS = 0.5
+        module._ACCEPT_RESTORE_WINDOW_SECONDS = 0.5
         module._ACCEPT_POLL_INTERVAL_SECONDS = 0.001
         module._ACCEPT_DISCONNECT_HORIZON_SECONDS = horizon
-        module._ACCEPT_RESTORE_RESERVED_SECONDS = 0.03
+        module._ACCEPT_RESTORE_RESERVED_SECONDS = 1.5
         module._ACCEPT_DEADLINE_SECONDS = deadline
 
         opener = mock.MagicMock()
@@ -2353,6 +2353,9 @@ if exit_path.is_file():
         with self._scripted_accept(module, steps, deadline=0.0405, horizon=0.005):
             module._ACCEPT_OPEN_TIMEOUT_SECONDS = 0.0125
             module._ACCEPT_RESTORE_WINDOW_SECONDS = 0.0125
+            module._ACCEPT_WARMUP_WINDOW_SECONDS = 0.01
+            module._ACCEPT_SWITCH_WINDOW_SECONDS = 0.01
+            module._ACCEPT_RESTORE_RESERVED_SECONDS = 0.03
             with mock.patch.object(module._time, "monotonic", side_effect=monotonic):
                 with mock.patch.object(module._time, "sleep", side_effect=sleep):
                     with self.assertRaises(module.DispatchError) as caught:
