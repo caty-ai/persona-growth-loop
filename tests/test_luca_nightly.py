@@ -447,7 +447,8 @@ class LucaNightlyTests(unittest.TestCase):
                 timeline.append("git-tag")
             return subprocess.CompletedProcess(["git", *args], returncode, output, b"")
 
-        def persona(command: str, _cwd: Path):
+        def persona(command: str, clone: Path, install_root: Path):
+            self.assertEqual(install_root, staging)
             timeline.append(f"persona-{command}")
             if command == "build":
                 (staging / "build").mkdir()
@@ -458,7 +459,12 @@ class LucaNightlyTests(unittest.TestCase):
                 stdout = b""
             else:
                 stdout = b'{"ok":true,"issues":[]}\n'
-            return subprocess.CompletedProcess(["persona", command], 0, stdout, b"")
+            return subprocess.CompletedProcess(
+                ["node", str(clone / "packages/core/bin/persona"), command],
+                0,
+                stdout,
+                b"",
+            )
 
         def deploy(*, content_hash: str, attempt: object, **_kwargs: object) -> object:
             self.assertEqual(content_hash, HASH)

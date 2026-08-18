@@ -135,10 +135,11 @@ class LucaFixture(unittest.TestCase):
         def run(command: list[str] | tuple[str, ...], cwd: Path) -> subprocess.CompletedProcess[str]:
             if tuple(command[:3]) == ("git", "pull", "--ff-only"):
                 return _completed(command, pull_code, stderr="pull rejected" if pull_code else "")
+            install_root = Path(command[command.index("--dir") + 1])
             if "build" in command:
-                content_hash = _persona_content_hash(self.staging / "pack")
+                content_hash = _persona_content_hash(install_root / "pack")
                 if build_code == 0:
-                    build = self.staging / "build"
+                    build = install_root / "build"
                     build.mkdir(parents=True, exist_ok=True)
                     (build / "manifest.json").write_text(
                         json.dumps({"content_hash": content_hash}) + "\n", encoding="utf-8"

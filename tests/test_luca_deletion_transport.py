@@ -304,21 +304,27 @@ class LucaOperationFixture:
         }
 
     def _fake_persona(
-        self, command: str, cwd: Path
+        self, command: str, clone: Path, install_root: Path
     ) -> subprocess.CompletedProcess[bytes]:
         if command == "build":
-            build = cwd / "build"
+            build = install_root / "build"
             build.mkdir()
-            content_hash = self._content_hash(cwd / "pack")
+            content_hash = self._content_hash(install_root / "pack")
             (build / "manifest.json").write_text(
                 json.dumps({"content_hash": content_hash}), encoding="utf-8"
             )
             return subprocess.CompletedProcess(
-                ["persona", command], 0, b'{"ok":true}\n', b""
+                ["node", str(clone / "packages/core/bin/persona"), command],
+                0,
+                b'{"ok":true}\n',
+                b"",
             )
         if command == "doctor":
             return subprocess.CompletedProcess(
-                ["persona", command], 0, b'{"ok":true,"issues":[]}\n', b""
+                ["node", str(clone / "packages/core/bin/persona"), command],
+                0,
+                b'{"ok":true,"issues":[]}\n',
+                b"",
             )
         raise AssertionError(command)
 

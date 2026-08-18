@@ -18,6 +18,12 @@ from growthlane.soul import SoulError, write_manifest
 
 
 class TransactionRevertTests(unittest.TestCase):
+    def _write_persona_cli(self, clone: Path) -> Path:
+        cli = clone / "packages" / "core" / "bin" / "persona"
+        cli.parent.mkdir(parents=True, exist_ok=True)
+        cli.write_text("fixture\n", encoding="utf-8")
+        return cli
+
     def _fixture(self, root: Path, face: str) -> tuple[Path, Path, object, dict[str, str]]:
         pgl_home = root / "home"
         profile = get_profile(face)
@@ -25,6 +31,7 @@ class TransactionRevertTests(unittest.TestCase):
         if face == "luca":
             for rel in ("persona-engine/catalogs/overlay", "growth"):
                 (overlay / rel).mkdir(parents=True, exist_ok=True)
+            self._write_persona_cli(overlay)
             staging = root / "luca-staging"
             staging.mkdir()
             (staging / "install.yml").write_text("version: 1\n", encoding="utf-8")
@@ -71,12 +78,18 @@ class TransactionRevertTests(unittest.TestCase):
         return pgl_home, overlay, profile, config
 
     def test_persona_failure_detail_is_truncated_to_500_bytes(self) -> None:
-        completed = subprocess.CompletedProcess(
-            ["persona", "build"], 7, b"", b"x" * 600
-        )
-        with mock.patch("applier.apply.subprocess.run", return_value=completed):
-            with self.assertRaises(ApplyError) as raised:
-                apply_module._run_persona("build", Path("."))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            clone = root / "clone"
+            install_root = root / "install"
+            install_root.mkdir()
+            self._write_persona_cli(clone)
+            completed = subprocess.CompletedProcess(
+                ["node", str(clone / "packages/core/bin/persona"), "build"], 7, b"", b"x" * 600
+            )
+            with mock.patch("applier.apply.subprocess.run", return_value=completed):
+                with self.assertRaises(ApplyError) as raised:
+                    apply_module._run_persona("build", clone, install_root)
         message = str(raised.exception)
         self.assertIn("x" * 500, message)
         self.assertNotIn("x" * 501, message)
@@ -95,10 +108,15 @@ class TransactionRevertTests(unittest.TestCase):
             (overlay / profile.blocklist_path).write_bytes(b"")
             for rel in profile.render_files.values():
                 (overlay / rel).write_bytes(b"")
+            self._write_persona_cli(overlay)
             subprocess.run(["git", "init", "-q"], cwd=overlay, check=True)
             subprocess.run(["git", "config", "user.name", "PGL Test"], cwd=overlay, check=True)
             subprocess.run(["git", "config", "user.email", "pgl@example.invalid"], cwd=overlay, check=True)
-            subprocess.run(["git", "add", "--", *profile.allowlist], cwd=overlay, check=True)
+            subprocess.run(
+                ["git", "add", "--", *profile.allowlist, "packages/core/bin/persona"],
+                cwd=overlay,
+                check=True,
+            )
             subprocess.run(["git", "commit", "-qm", "bootstrap"], cwd=overlay, check=True)
             soul = overlay / "persona-engine" / "catalogs" / "soul.txt"
             soul.write_text("frozen\n", encoding="utf-8")
@@ -125,19 +143,22 @@ class TransactionRevertTests(unittest.TestCase):
             original = {rel: (overlay / rel).read_bytes() for rel in profile.allowlist}
             fake_bin = root / "bin"
             fake_bin.mkdir()
-            persona = fake_bin / "persona"
-            persona.write_text(
+            node = fake_bin / "node"
+            node.write_text(
                 "#!/bin/sh\n"
-                "if [ \"$1\" = build ]; then\n"
-                "  mkdir -p build\n"
+                "command=$2\n"
+                "if [ \"$3\" != --dir ]; then exit 2; fi\n"
+                "root=$4\n"
+                "if [ \"$command\" = build ]; then\n"
+                "  mkdir -p \"$root/build\"\n"
                 "  printf 'changed\\n' > \"$PGL_TEST_SOUL\"\n"
-                "  printf '{\"content_hash\":\"%064d\"}\\n' 0 > build/manifest.json\n"
+                "  printf '{\"content_hash\":\"%064d\"}\\n' 0 > \"$root/build/manifest.json\"\n"
                 "  exit 0\n"
                 "fi\n"
                 "printf '{\"ok\":true,\"issues\":[]}\\n'\n",
                 encoding="utf-8",
             )
-            persona.chmod(0o755)
+            node.chmod(0o755)
             digest = Digest(pgl_home, "2026-08-01")
             with mock.patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ['PATH']}", "PGL_TEST_SOUL": str(soul)}):
                 with self.assertRaises(SoulError):
@@ -286,11 +307,11 @@ class TransactionRevertTests(unittest.TestCase):
                 original = {rel: (overlay / rel).read_bytes() for rel in profile.allowlist}
                 fake_bin = root / "bin"
                 fake_bin.mkdir()
-                persona = fake_bin / "persona"
+                node = fake_bin / "node"
                 build_manifest = (
-                    "printf '{}\\n' > build/manifest.json"
+                    "printf '{}\\n' > \"$root/build/manifest.json\""
                     if mode == "missing"
-                    else "printf '{\"content_hash\":\"%064d\"}\\n' 0 > build/manifest.json"
+                    else "printf '{\"content_hash\":\"%064d\"}\\n' 0 > \"$root/build/manifest.json\""
                 )
                 mutation = (
                     "printf smuggled > \"$PGL_TEST_OVERLAY/persona-engine/catalogs/overlay/candidates.txt\""
@@ -305,10 +326,13 @@ class TransactionRevertTests(unittest.TestCase):
                     doctor = "printf 'not-json\\n'"
                 else:
                     doctor = "printf '{\"ok\":true,\"issues\":[]}\\n'"
-                persona.write_text(
+                node.write_text(
                     "#!/bin/sh\n"
-                    "if [ \"$1\" = build ]; then\n"
-                    "  mkdir -p build\n"
+                    "command=$2\n"
+                    "if [ \"$3\" != --dir ]; then exit 2; fi\n"
+                    "root=$4\n"
+                    "if [ \"$command\" = build ]; then\n"
+                    "  mkdir -p \"$root/build\"\n"
                     f"  {mutation}\n"
                     f"  {build_manifest}\n"
                     "  printf 'build complete\\n'\n"
@@ -317,7 +341,7 @@ class TransactionRevertTests(unittest.TestCase):
                     f"{doctor}\n",
                     encoding="utf-8",
                 )
-                persona.chmod(0o755)
+                node.chmod(0o755)
                 digest = Digest(pgl_home, "2026-08-01")
                 with mock.patch.dict(
                     os.environ,
@@ -351,19 +375,22 @@ class TransactionRevertTests(unittest.TestCase):
             _pgl_home, overlay, profile, config = self._fixture(root, "luca")
             fake_bin = root / "bin"
             fake_bin.mkdir()
-            persona = fake_bin / "persona"
-            persona.write_text(
+            node = fake_bin / "node"
+            node.write_text(
                 "#!/bin/sh\n"
-                "if [ \"$1\" = build ]; then\n"
-                "  mkdir -p build\n"
+                "command=$2\n"
+                "if [ \"$3\" != --dir ]; then exit 2; fi\n"
+                "root=$4\n"
+                "if [ \"$command\" = build ]; then\n"
+                "  mkdir -p \"$root/build\"\n"
                 "  printf '%064d\\n' 1\n"
-                "  printf '{\"content_hash\":\"%064d\"}\\n' 0 > build/manifest.json\n"
+                "  printf '{\"content_hash\":\"%064d\"}\\n' 0 > \"$root/build/manifest.json\"\n"
                 "  exit 0\n"
                 "fi\n"
                 "printf '{\"ok\":true,\"issues\":[]}\\n'\n",
                 encoding="utf-8",
             )
-            persona.chmod(0o755)
+            node.chmod(0o755)
             with mock.patch.dict(
                 os.environ, {"PATH": f"{fake_bin}:{os.environ['PATH']}"}
             ):
@@ -390,25 +417,28 @@ class TransactionRevertTests(unittest.TestCase):
             fake_bin = root / "bin"
             fake_bin.mkdir()
             calls = root / "persona-calls.txt"
-            persona = fake_bin / "persona"
-            persona.write_text(
+            node = fake_bin / "node"
+            node.write_text(
                 "#!/bin/sh\n"
-                "printf '%s:%s\\n' \"$1\" \"$PWD\" >> \"$PGL_TEST_CALLS\"\n"
-                "if [ \"$1\" = build ]; then\n"
-                "  mkdir -p build\n"
-                "  cp pack/catalogs/source-marker.txt build/source-marker.txt\n"
-                "  if grep -q second pack/catalogs/source-marker.txt; then\n"
-                "    printf '{\"content_hash\":\"%064d\"}\\n' 1 > build/manifest.json\n"
+                "command=$2\n"
+                "if [ \"$3\" != --dir ]; then exit 2; fi\n"
+                "root=$4\n"
+                "printf '%s:%s\\n' \"$command\" \"$root\" >> \"$PGL_TEST_CALLS\"\n"
+                "if [ \"$command\" = build ]; then\n"
+                "  mkdir -p \"$root/build\"\n"
+                "  cp \"$root/pack/catalogs/source-marker.txt\" \"$root/build/source-marker.txt\"\n"
+                "  if grep -q second \"$root/pack/catalogs/source-marker.txt\"; then\n"
+                "    printf '{\"content_hash\":\"%064d\"}\\n' 1 > \"$root/build/manifest.json\"\n"
                 "  else\n"
-                "    printf '{\"content_hash\":\"%064d\"}\\n' 0 > build/manifest.json\n"
+                "    printf '{\"content_hash\":\"%064d\"}\\n' 0 > \"$root/build/manifest.json\"\n"
                 "  fi\n"
                 "  exit 0\n"
                 "fi\n"
-                "test -f build/source-marker.txt || exit 1\n"
+                "test -f \"$root/build/source-marker.txt\" || exit 1\n"
                 "printf '{\"ok\":true,\"issues\":[]}\\n'\n",
                 encoding="utf-8",
             )
-            persona.chmod(0o755)
+            node.chmod(0o755)
             environment = {
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
                 "PGL_TEST_CALLS": str(calls),
