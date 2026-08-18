@@ -1638,11 +1638,13 @@ if exit_path.is_file():
         *,
         respond_before_write=False,
         suppress_switch_status_write=False,
+        response_delay_by_input=None,
     ):
         requests = []
         session_id = "12345678-1234-1234-1234-123456789abc"
         install = self.install
         manifest = json.loads((self.build / "manifest.json").read_text(encoding="utf-8"))
+        response_delay_by_input = response_delay_by_input or {}
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(handler):
@@ -1653,6 +1655,7 @@ if exit_path.is_file():
                     handler.send_error(403)
                     return
                 utterance = body["input"]
+                response_delay = response_delay_by_input.get(utterance, 0)
                 status = None
                 if utterance.startswith("/persona "):
                     mode = utterance.split(" ", 1)[1]
@@ -1684,12 +1687,17 @@ if exit_path.is_file():
                     (install / "state/status.json").write_text(
                         json.dumps(status), encoding="utf-8"
                     )
-                handler.send_response(200)
-                handler.send_header("X-Hermes-Session-Id", session_id)
-                handler.send_header("Content-Length", "2")
-                handler.end_headers()
-                handler.wfile.write(b"{}")
-                handler.wfile.flush()
+                if response_delay:
+                    time.sleep(response_delay)
+                try:
+                    handler.send_response(200)
+                    handler.send_header("X-Hermes-Session-Id", session_id)
+                    handler.send_header("Content-Length", "2")
+                    handler.end_headers()
+                    handler.wfile.write(b"{}")
+                    handler.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    return
                 if delayed_status is not None:
                     time.sleep(0.1)
                     (install / "state/status.json").write_text(
@@ -1835,7 +1843,7 @@ if exit_path.is_file():
         request = opener.open.call_args.args[0]
         self.assertEqual(request.full_url, "http://127.0.0.1:4321/v1/responses")
         self.assertEqual(request.get_header("Authorization"), "Bearer fixture-secret")
-        self.assertEqual(opener.open.call_args.kwargs["timeout"], 30)
+        self.assertEqual(opener.open.call_args.kwargs["timeout"], 60)
 
     def test_accept_transport_rejects_redirects_cleanly(self):
         module = load_dispatch_module("luca_dispatch_redirect")
@@ -2018,6 +2026,42 @@ if exit_path.is_file():
                 module._accept(self.install, config, self.root / "backups", "standard")
         self.assertEqual(caught.exception.reason_code, "accept-switch-request-timeout")
 
+    def test_accept_warmup_timeout_rejects_before_switch_turn(self):
+        module = load_dispatch_module("luca_dispatch_accept_warmup_timeout")
+        try:
+            server, thread, requests, _session_id = self._run_accept_server(
+                response_delay_by_input={"deployment warm-up": 0.2}
+            )
+        except PermissionError:
+            self.skipTest("loopback bind unavailable in this sandbox")
+        stderr = io.StringIO()
+        stdout_bytes = io.BytesIO()
+        stdout = io.TextIOWrapper(stdout_bytes, encoding="utf-8")
+        environment = {
+            "SSH_ORIGINAL_COMMAND": "accept",
+            "PGL_LUCA_DISPATCH_TESTING": "1",
+            "PGL_LUCA_DISPATCH_TEST_ROOT": str(self.root),
+        }
+        try:
+            with mock.patch.object(module, "_ACCEPT_TIMEOUT_SECONDS", 0.05):
+                with mock.patch.object(module.sys, "argv", [str(DISPATCH), "deploy"]):
+                    with mock.patch.object(module.os, "environ", environment):
+                        with mock.patch.object(module.sys, "stderr", stderr):
+                            with mock.patch.object(module.sys, "stdout", stdout):
+                                returncode = module.main()
+                                stdout.flush()
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+        self.assertEqual(returncode, 1)
+        self.assertEqual(stderr.getvalue(), reason_line("accept-warmup-timeout"))
+        self.assertEqual(stdout_bytes.getvalue(), b"")
+        self.assertEqual(
+            [entry[2]["input"] for entry in requests],
+            ["deployment warm-up"],
+        )
+
     def test_accept_warmup_failure_rejects_before_switch_turn(self):
         module = load_dispatch_module("luca_dispatch_accept_warmup_failed")
         self._write_accept_status("public")
@@ -2047,6 +2091,14 @@ if exit_path.is_file():
         self.assertEqual(stderr.getvalue(), reason_line("accept-warmup-failed"))
         self.assertEqual(stdout_bytes.getvalue(), b"")
         self.assertEqual(calls, ["deployment warm-up"])
+
+    def test_accept_timeout_budget_stays_below_ssh_cap(self):
+        module = load_dispatch_module("luca_dispatch_accept_timeout_budget")
+        self.assertEqual(module._ACCEPT_TIMEOUT_SECONDS, 60)
+        self.assertLess(
+            module._ACCEPT_TIMEOUT_SECONDS * 4 + 2 * module._ASSERT_MODE_SETTLE_RETRIES,
+            280,
+        )
 
     def test_accept_switch_failure_after_runtime_write_still_restores(self):
         module = load_dispatch_module("luca_dispatch_accept_presend_latch")
@@ -2490,9 +2542,12 @@ if exit_path.is_file():
 
     def test_reason_vocabulary_has_closed_safe_shape(self):
         module = load_dispatch_module("luca_dispatch_reason_vocabulary")
+        self.assertEqual(len(module._REASON_CODES), 13)
+        self.assertEqual(len(module._REASON_LINES), 13)
         self.assertEqual(
             module._REASON_CODES,
             {
+                "accept-warmup-timeout",
                 "accept-warmup-failed",
                 "accept-switch-request-failed",
                 "accept-switch-request-timeout",

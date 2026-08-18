@@ -74,6 +74,7 @@ _TEST_SENTINEL_CONTENT = b"pgl-luca-dispatch test root\n"
 
 _ERROR_LINE = "pgl-luca-dispatch: request rejected\n"
 _REASON_LINES: dict[str, str] = {
+    "accept-warmup-timeout": "pgl-luca-dispatch: request rejected: accept-warmup-timeout\n",
     "accept-warmup-failed": "pgl-luca-dispatch: request rejected: accept-warmup-failed\n",
     "accept-switch-request-failed": "pgl-luca-dispatch: request rejected: accept-switch-request-failed\n",
     "accept-switch-request-timeout": "pgl-luca-dispatch: request rejected: accept-switch-request-timeout\n",
@@ -127,7 +128,11 @@ _RESTART_TIMEOUT_SECONDS = 240
 _RESTART_VERIFY_SAMPLES = 3
 _RESTART_VERIFY_DWELL_SECONDS = 2
 _RESTART_VERIFY_TIMEOUT_SECONDS = 5
-_ACCEPT_TIMEOUT_SECONDS = 30
+# Four accept turns at 60s each plus the two 1s switch settle retries stay
+# below growthlane/deploy.py _run_command's 300s SSH cap with roughly 50s of
+# margin; any future raise to this accept budget must move that client ceiling
+# together.
+_ACCEPT_TIMEOUT_SECONDS = 60
 _ACCEPT_RESTORE_RETRIES = 2
 _ASSERT_MODE_SETTLE_RETRIES = 2
 _ASSERT_MODE_SETTLE_DELAY_SECONDS = 1
@@ -1672,6 +1677,10 @@ def _accept(install_root: Path, config_path: Path, backups_root: Path, kind: str
     restore_attempt_failed = False
     try:
         sessions.append(_send_accept_turn(token, port, conversation, "deployment warm-up"))
+    except _AcceptRequestTimeout as exc:
+        raise DispatchError(
+            "acceptance failed", reason_code="accept-warmup-timeout"
+        ) from exc
     except DispatchError as exc:
         raise DispatchError(
             "acceptance failed", reason_code="accept-warmup-failed"
