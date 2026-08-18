@@ -1771,10 +1771,7 @@ if exit_path.is_file():
 
     def test_accept_real_streams_persist_owned_status_before_client_disconnect(self):
         module = load_dispatch_module("luca_dispatch_accept_real_streams")
-        try:
-            server, thread, records, session_ids = self._run_accept_server()
-        except PermissionError:
-            self.skipTest("loopback bind unavailable in this sandbox")
+        server, thread, records, session_ids = self._run_accept_server()
         client_body_reads = []
 
         def reject_body_read(response, *_arguments, **_kwargs):
