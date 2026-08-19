@@ -75,6 +75,34 @@ flowchart LR
 
 ---
 
+<a id="root-directory-map"></a>
+
+## ルートディレクトリマップ
+
+| ディレクトリ | 役割 |
+|---|---|
+| `.github/` | macOS / Linux のテストスイートを実行する GitHub Actions CI workflow |
+| `adapters/` | probe responder・probe scorer・signal classifier を外部モデルにつなぐ seam |
+| `aggregator/` | Tier L の観測と usage record から遅延証拠を再計算 |
+| `applier/` | 決定論的・path-scoped・atomic な overlay transaction を実行 |
+| `assets/` | README で使う画像 asset |
+| `bin/` | 観測・成長・mirror・復旧操作のユーザー／operator 向け CLI entry point |
+| `classifierd/` | 任意の第2段 negative signal / mention 分類を行う厳格な JSON seam |
+| `collectors/` | Claude Code と Hermes Luca 向けの read-only・filter / scrub 済み観測 collector |
+| `config/` | face 別の runtime・collector・mirror 設定と、governance 対象の evidence 設定 |
+| `docs/` | 凍結済み architecture / contract、rollout 記録、operator note |
+| `growthlane/` | 夜間 lane driver: gate と lock の下で harvester → aggregator/evidence → writerd → reviewd → applier を実行 |
+| `harvester/` | Tier L の観測から決定論的に phrase candidate を抽出 |
+| `mirror/` | write path の外から baseline・週次・月次の drift check で結果を観測 |
+| `probes/` | drift mirror が使う version 固定の eval corpus と manifest |
+| `reviewd/` | fail-closed で exact-`APPROVE` を要求する diff-review seam |
+| `templates/` | observation collector と weekly mirror の launchd job template |
+| `tests/` | unit / integration test suite、fixture、adapter stub |
+| `vps/` | Luca 用 forced-command production dispatch entry point |
+| `writerd/` | 採用可能な evidence から proposal を生成する fail-closed JSON writer seam |
+
+---
+
 <a id="how-it-keeps-the-soul-safe"></a>
 
 ## 壊さないための仕組み
@@ -169,7 +197,7 @@ PGL は証拠に基づいて、ゲートの内側で、ゆっくり話し方を�
 | [docs/contracts/observation-log-schema.md](docs/contracts/observation-log-schema.md) | 何を観測・保存してよいか（Tier 別） |
 | [docs/contracts/evidence-rules.md](docs/contracts/evidence-rules.md) | フレーズが採用に値する条件 |
 | [INTEGRATION.md](INTEGRATION.md) | ランタイム・ゲート・harness 登録・cron |
-| [docs/ops/](docs/ops/collector-wiring.md) | 運用ノート。ホスト固有の runbook は非公開 ops リポ側にあります |
+| [docs/ops/](docs/ops/) | 運用ノート。ホスト固有の runbook は非公開 ops リポ側にあります |
 
 技術文書は現在日本語です（プロジェクトの作業言語）。契約は凍結済みなので、翻訳は「動く標的」ではなく文書化タスクとして進められます。
 
