@@ -151,7 +151,7 @@ The shortest path: give your coding agent (Claude Code or similar) this reposito
 git clone https://github.com/caty-ai/persona-growth-loop.git
 cd persona-growth-loop
 python3 -m pip install -r requirements.txt
-python3 -m unittest discover -s tests
+make test
 ```
 
 A few minutes, no network access needed by the suite, nothing written outside the checkout. Until you deliberately create the human-owned `gates.yml` and per-face GO records described in [INTEGRATION.md](INTEGRATION.md), PGL cannot write to any persona file — the read-only default is the fail-closed design, not a limitation.
@@ -171,6 +171,8 @@ A few minutes, no network access needed by the suite, nothing written outside th
 <a id="project-status"></a>
 
 ## Project status
+
+maturity: **reference** — production-grade, running nightly in production; APIs may still move with the frozen contracts
 
 Honest state of the two production faces, as of 2026-08-12:
 

@@ -8,15 +8,21 @@ Thanks for your interest in improving Persona Growth Loop.
 - **Contracts are frozen documents.** The three contract documents ([docs/contracts/](docs/contracts/)) and the frozen architecture ([docs/architecture-v1.md](docs/architecture-v1.md)) are the source of truth; code follows them, not the other way round. A change that relaxes a cap, a gate, or a fail-closed path needs an explicit contract amendment in the same review, and loosening changes get the stricter review lane.
 - **Honest completion.** A change is done when its stated done-conditions pass with evidence, not when it looks done. Pull requests should list which conditions passed and how they were checked.
 
+## Prerequisites
+
+- Python 3.14.x, pinned to Unicode Character Database (UCD) 16.0.0; see [UCD corpus regeneration](docs/ops/ucd-corpus-regeneration.md) for why
+- PyYAML (`python3 -m pip install -r requirements.txt`)
+- `make` (any POSIX make; the entry points are `make test` and `make lint`)
+
 ## Running the tests
 
-From the repository root:
+From the repository root (`make test` wraps `python3 -m unittest discover -s tests`):
 
 ```sh
-python3 -m unittest discover -s tests
+make test
 ```
 
-The suite is pure standard-library Python 3 and needs no network. All tests must pass before a pull request is reviewed. If your change alters collector filtering, gate checks, applier behavior, or the deploy dispatcher, add or extend a test that pins the new contract.
+The suite uses the Python standard library plus PyYAML and needs no network. All tests must pass before a pull request is reviewed. If your change alters collector filtering, gate checks, applier behavior, or the deploy dispatcher, add or extend a test that pins the new contract.
 
 ## Pull requests
 
