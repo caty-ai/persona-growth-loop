@@ -75,6 +75,34 @@ flowchart LR
 
 ---
 
+<a id="root-directory-map"></a>
+
+## 根目录一览
+
+| 目录 | 职责 |
+|---|---|
+| `.github/` | 通过 GitHub Actions CI 在 macOS 和 Linux 上运行测试套件 |
+| `adapters/` | 连接外部模型的 probe responder、probe scorer 和 signal classifier seam |
+| `aggregator/` | 根据 Tier L 观测和 usage record 重新计算延迟证据 |
+| `applier/` | 执行确定性、path-scoped、atomic 的 overlay transaction |
+| `assets/` | README 使用的图片 asset |
+| `bin/` | 观测、成长、mirror 和恢复操作的用户及 operator CLI entry point |
+| `classifierd/` | 用于可选第二阶段 negative signal / mention 分类的严格 JSON seam |
+| `collectors/` | 面向 Claude Code 和 Hermes Luca 的 read-only、经过 filter / scrub 的观测 collector |
+| `config/` | 各 face 的 runtime、collector、mirror 配置及受 governance 约束的 evidence 配置 |
+| `docs/` | 已冻结的 architecture / contract、rollout 记录和 operator note |
+| `growthlane/` | 夜间 lane driver：在 gate 和 lock 下运行 harvester → aggregator/evidence → writerd → reviewd → applier |
+| `harvester/` | 从 Tier L 观测中确定性地提取 phrase candidate |
+| `mirror/` | 在 write path 之外通过 baseline、每周和每月 drift check 观测结果 |
+| `probes/` | drift mirror 使用的版本固定 eval corpus 和 manifest |
+| `reviewd/` | fail-closed、要求 exact-`APPROVE` 的 diff-review seam |
+| `templates/` | observation collector 和 weekly mirror 的 launchd job template |
+| `tests/` | unit / integration test suite、fixture 和 adapter stub |
+| `vps/` | Luca 的 forced-command production dispatch entry point |
+| `writerd/` | 根据符合条件的 evidence 生成 proposal 的 fail-closed JSON writer seam |
+
+---
+
 <a id="how-it-keeps-the-soul-safe"></a>
 
 ## 如何确保 soul（灵魂层）的安全
@@ -169,7 +197,7 @@ PGL 是在闸门保护下、依据证据、缓慢地培养说话风格。如果�
 | [docs/contracts/observation-log-schema.md](docs/contracts/observation-log-schema.md) | 按层级说明哪些内容可以被观测和存储 |
 | [docs/contracts/evidence-rules.md](docs/contracts/evidence-rules.md) | 一个短语何时才算"证据充分、值得采纳" |
 | [INTEGRATION.md](INTEGRATION.md) | 运行时、闸门、harness 注册条目、cron 配置 |
-| [docs/ops/](docs/ops/collector-wiring.md) | 运维笔记；特定主机的 runbook 保存在私有 ops 仓库中 |
+| [docs/ops/](docs/ops/) | 运维笔记；特定主机的 runbook 保存在私有 ops 仓库中 |
 
 目前技术文档以日语撰写（项目的工作语言）；由于契约已经冻结，翻译只是一项文档工作，而不是需要追着变动的目标。
 

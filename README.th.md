@@ -75,6 +75,34 @@ flowchart LR
 
 ---
 
+<a id="root-directory-map"></a>
+
+## แผนผังไดเรกทอรีราก
+
+| ไดเรกทอรี | บทบาท |
+|---|---|
+| `.github/` | workflow ของ GitHub Actions CI สำหรับชุดทดสอบบน macOS และ Linux |
+| `adapters/` | seam เชื่อมต่อโมเดลภายนอกสำหรับ probe responder, probe scorer และ signal classifier |
+| `aggregator/` | คำนวณหลักฐานแบบหน่วงเวลาใหม่จากข้อมูลสังเกต Tier L และ usage record |
+| `applier/` | รัน overlay transaction แบบ deterministic, path-scoped และ atomic |
+| `assets/` | image asset ที่ใช้ใน README |
+| `bin/` | CLI entry point สำหรับผู้ใช้และ operator เพื่อสั่งงานการสังเกต การเติบโต mirror และการกู้คืน |
+| `classifierd/` | JSON seam แบบเข้มงวดสำหรับการจำแนก negative signal / mention ขั้นที่สองซึ่งเลือกใช้ได้ |
+| `collectors/` | observation collector แบบ read-only ที่ผ่าน filter / scrub สำหรับ Claude Code และ Hermes Luca |
+| `config/` | การตั้งค่า runtime, collector และ mirror แยกตาม face รวมถึง evidence config ภายใต้ governance |
+| `docs/` | architecture / contract ที่แช่แข็งแล้ว บันทึก rollout และ operator note |
+| `growthlane/` | nightly lane driver: ตรวจ gate และ lock ก่อนรัน harvester → aggregator/evidence → writerd → reviewd → applier |
+| `harvester/` | สกัด phrase candidate จากข้อมูลสังเกต Tier L แบบ deterministic |
+| `mirror/` | สังเกตผลลัพธ์จากนอก write path ด้วย baseline และ drift check รายสัปดาห์ / รายเดือน |
+| `probes/` | eval corpus และ manifest แบบตรึงเวอร์ชันที่ drift mirror ใช้ |
+| `reviewd/` | diff-review seam แบบ fail-closed ที่กำหนดให้ต้องเป็น exact-`APPROVE` |
+| `templates/` | launchd job template สำหรับ observation collector และ weekly mirror |
+| `tests/` | unit / integration test suite, fixture และ adapter stub |
+| `vps/` | forced-command production dispatch entry point สำหรับ Luca |
+| `writerd/` | JSON writer seam แบบ fail-closed ที่สร้าง proposal จาก evidence ที่ผ่านเกณฑ์ |
+
+---
+
 <a id="how-it-keeps-the-soul-safe"></a>
 
 ## PGL ปกป้อง soul ได้อย่างไร
@@ -169,7 +197,7 @@ PGL พัฒนาสำเนียงการพูดอย่างช้�
 | [docs/contracts/observation-log-schema.md](docs/contracts/observation-log-schema.md) | สิ่งที่สังเกตการณ์และจัดเก็บได้ แบ่งตามระดับชั้น |
 | [docs/contracts/evidence-rules.md](docs/contracts/evidence-rules.md) | เงื่อนไขที่วลีหนึ่งจะสมควรได้รับการรับเข้า |
 | [INTEGRATION.md](INTEGRATION.md) | รันไทม์ เกต รายการลงทะเบียน harness รายการ cron |
-| [docs/ops/](docs/ops/collector-wiring.md) | บันทึกของผู้ดูแลระบบ ส่วน runbook เฉพาะโฮสต์เก็บไว้ในรีพอสิทอรี ops ส่วนตัว |
+| [docs/ops/](docs/ops/) | บันทึกของผู้ดูแลระบบ ส่วน runbook เฉพาะโฮสต์เก็บไว้ในรีพอสิทอรี ops ส่วนตัว |
 
 ปัจจุบันเอกสารทางเทคนิคเขียนเป็นภาษาญี่ปุ่น (ภาษาที่ใช้ทำงานของโปรเจกต์นี้) เนื่องจากข้อตกลงต่าง ๆ ถูกแช่แข็งแล้ว การแปลจึงเป็นงานด้านเอกสารทั่วไป ไม่ใช่เป้าหมายที่เปลี่ยนแปลงตลอดเวลา
 

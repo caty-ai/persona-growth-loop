@@ -75,6 +75,34 @@ flowchart LR
 
 ---
 
+<a id="root-directory-map"></a>
+
+## Root directory map
+
+| Directory | Role |
+|---|---|
+| `.github/` | GitHub Actions CI workflow for the macOS and Linux test suite |
+| `adapters/` | External-model seams for the probe responder, probe scorer, and signal classifier |
+| `aggregator/` | Recomputes delayed evidence from Tier L observations and usage records |
+| `applier/` | Runs deterministic, path-scoped, atomic overlay transactions |
+| `assets/` | Image assets used by the READMEs |
+| `bin/` | User and operator CLI entry points for collection, growth, mirror, and recovery operations |
+| `classifierd/` | Strict JSON seam for optional second-stage negative-signal and mention classification |
+| `collectors/` | Read-only, filtered and scrubbed observation collectors for Claude Code and Hermes Luca |
+| `config/` | Per-face runtime, collector, mirror, and governed evidence configuration |
+| `docs/` | Frozen architecture and contracts, rollout records, and operator notes |
+| `growthlane/` | Nightly lane driver: gates and locks the harvester → aggregator/evidence → writerd → reviewd → applier pipeline |
+| `harvester/` | Harvests deterministic phrase candidates from Tier L observations |
+| `mirror/` | Observes the result outside the write path through baseline, weekly, and monthly drift checks |
+| `probes/` | Versioned fixed eval corpus and manifest used by the drift mirror |
+| `reviewd/` | Fail-closed, exact-`APPROVE` diff-review seam |
+| `templates/` | launchd job templates for observation collectors and weekly mirrors |
+| `tests/` | Unit and integration test suite, fixtures, and adapter stubs |
+| `vps/` | Forced-command production dispatch entry point for Luca |
+| `writerd/` | Fail-closed JSON writer seam that generates proposals from eligible evidence |
+
+---
+
 <a id="how-it-keeps-the-soul-safe"></a>
 
 ## How it keeps the soul safe
@@ -169,7 +197,7 @@ The design that produced this status is frozen and documented — that is the de
 | [docs/contracts/observation-log-schema.md](docs/contracts/observation-log-schema.md) | What may be observed and stored, tier by tier |
 | [docs/contracts/evidence-rules.md](docs/contracts/evidence-rules.md) | When a phrase has earned adoption |
 | [INTEGRATION.md](INTEGRATION.md) | Runtimes, gates, harness registry entry, cron entries |
-| [docs/ops/](docs/ops/collector-wiring.md) | Operator notes; host-specific runbooks stay in the private ops repository |
+| [docs/ops/](docs/ops/) | Operator notes; host-specific runbooks stay in the private ops repository |
 
 Technical documents are currently in Japanese (the project's working language); the contracts are frozen, so translations are a documentation task rather than a moving target.
 
