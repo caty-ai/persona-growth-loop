@@ -8,7 +8,7 @@
 
 [![tests](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml/badge.svg)](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![python](https://img.shields.io/badge/python-3.14%2B-3776AB?logo=python&logoColor=white)
+![python](https://img.shields.io/badge/python-3.14.x-3776AB?logo=python&logoColor=white)
 ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20(CI)-lightgrey)
 
 Persona Growth Loop（PGL）让长期运行的 AI 智能体从真实对话中<br>
@@ -97,7 +97,7 @@ flowchart LR
 
 | 要求 | 状态 |
 |---|---|
-| Python 3.14+（唯一依赖：PyYAML） | ✅ CI 与日常开发均为 3.14 |
+| Python 3.14.x，固定 UCD 16.0.0（唯一依赖：PyYAML） | ✅ CI 与日常开发均为 3.14 |
 | macOS | ✅ 日常生产环境使用中 |
 | Linux (Ubuntu) | ✅ CI 中运行完整测试套件（少数 macOS 专用集成测试按设计跳过；调度模板仅提供 launchd/macOS） |
 | 以 Claude Code 作为被观测的智能体（本地 face） | ✅ 已在生产环境中运行 |

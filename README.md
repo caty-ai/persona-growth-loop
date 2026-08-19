@@ -8,7 +8,7 @@
 
 [![tests](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml/badge.svg)](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![python](https://img.shields.io/badge/python-3.14%2B-3776AB?logo=python&logoColor=white)
+![python](https://img.shields.io/badge/python-3.14.x-3776AB?logo=python&logoColor=white)
 ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20(CI)-lightgrey)
 
 Persona Growth Loop (PGL) lets a long-running AI agent grow its own speaking style<br>
@@ -97,7 +97,7 @@ This safety net is not a promise — it is code you can run. Which brings us to 
 
 | Requirement | Status |
 |---|---|
-| Python 3.14+ (single dependency: PyYAML) | ✅ CI and daily development on 3.14 |
+| Python 3.14.x, pinned to UCD 16.0.0 (single dependency: PyYAML) | ✅ CI and daily development on 3.14 |
 | macOS | ✅ daily production use |
 | Linux (Ubuntu) | ✅ full test suite in CI (a few macOS-only integration tests are skipped by design; scheduling templates are launchd/macOS) |
 | Claude Code as the observed agent (local face) | ✅ in production |
