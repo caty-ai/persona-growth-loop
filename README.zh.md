@@ -97,7 +97,7 @@ flowchart LR
 
 | 要求 | 状态 |
 |---|---|
-| Python 3.14.x（固定 UCD 16.0.0）（唯一依赖：PyYAML） | ✅ CI 与日常开发均为 3.14 |
+| Python 3.14.x，固定 UCD 16.0.0（唯一依赖：PyYAML） | ✅ CI 与日常开发均为 3.14 |
 | macOS | ✅ 日常生产环境使用中 |
 | Linux (Ubuntu) | ✅ CI 中运行完整测试套件（少数 macOS 专用集成测试按设计跳过；调度模板仅提供 launchd/macOS） |
 | 以 Claude Code 作为被观测的智能体（本地 face） | ✅ 已在生产环境中运行 |

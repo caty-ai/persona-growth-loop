@@ -97,7 +97,7 @@ This safety net is not a promise — it is code you can run. Which brings us to 
 
 | Requirement | Status |
 |---|---|
-| Python 3.14.x (pinned to UCD 16.0.0) (single dependency: PyYAML) | ✅ CI and daily development on 3.14 |
+| Python 3.14.x, pinned to UCD 16.0.0 (single dependency: PyYAML) | ✅ CI and daily development on 3.14 |
 | macOS | ✅ daily production use |
 | Linux (Ubuntu) | ✅ full test suite in CI (a few macOS-only integration tests are skipped by design; scheduling templates are launchd/macOS) |
 | Claude Code as the observed agent (local face) | ✅ in production |

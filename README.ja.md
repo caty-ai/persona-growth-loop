@@ -97,7 +97,7 @@ flowchart LR
 
 | 要件 | 状態 |
 |---|---|
-| Python 3.14.x（UCD 16.0.0 固定）（依存は PyYAML 1つ） | ✅ CI・開発とも 3.14 |
+| Python 3.14.x・UCD 16.0.0 固定（依存は PyYAML 1つ） | ✅ CI・開発とも 3.14 |
 | macOS | ✅ 毎日の本番運用 |
 | Linux (Ubuntu) | ✅ CI でフルテストスイート実行（macOS 専用の統合テスト数件は設計上 skip・スケジューラ雛形は launchd=macOS 向け） |
 | 観測対象エージェント = Claude Code（ローカル面） | ✅ 本番稼働中 |

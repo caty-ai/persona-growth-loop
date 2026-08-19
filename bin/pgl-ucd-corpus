@@ -28,6 +28,22 @@ UCD_URL = (
 UCD_SHA256 = "39d35161f2954497f69e08bdb9e701493f476a3d30222de20028feda36c1dabd"
 EXPECTED_PROPERTY_COUNT = 4_174
 EXPECTED_REVIEW_CORPUS_COUNT = 4_186
+EXPECTED_STRAGGLERS = frozenset(
+    {
+        0x0000,
+        0x0001,
+        0x0002,
+        0x0008,
+        0x000B,
+        0x001F,
+        0x007F,
+        0x0080,
+        0x009F,
+        0x2800,
+        0xE000,
+        0x16FE4,
+    }
+)
 PROPERTY = "Default_Ignorable_Code_Point"
 CODEPOINT_FIELD = re.compile(r"^[0-9A-Fa-f]{4,6}(?:\.\.[0-9A-Fa-f]{4,6})?$")
 
@@ -135,6 +151,14 @@ def _format_ranges(ranges: tuple[tuple[int, int], ...]) -> str:
 
 
 def _validate_review_corpus() -> None:
+    if _BLANK_OR_NONPRINTING_STRAGGLERS != EXPECTED_STRAGGLERS:
+        difference = _BLANK_OR_NONPRINTING_STRAGGLERS ^ EXPECTED_STRAGGLERS
+        formatted = ", ".join(f"0x{codepoint:04X}" for codepoint in sorted(difference))
+        raise CorpusError(
+            "checked-in straggler set differs from expected; "
+            f"symmetric difference: {formatted}"
+        )
+
     count = len(IGNORABLE_CORPUS)
     if count != EXPECTED_REVIEW_CORPUS_COUNT:
         raise CorpusError(

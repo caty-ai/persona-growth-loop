@@ -43,10 +43,12 @@ match: 4174 codepoints in 17 ranges
 ```
 
 A network failure, checksum mismatch, malformed property range, wrong 4,174
-property total, wrong 4,186 review-corpus total, or range mismatch exits
-nonzero. A range mismatch prints a unified diff. Treat every mismatch as a
-fail-closed finding: do not edit `guard.py` until the source, parser result, and
-each changed boundary in the diff are understood and reviewed.
+property total, wrong pinned 12-codepoint straggler set, wrong 4,186
+review-corpus total, or range mismatch exits nonzero. The script pins the
+straggler set itself, not only its count. A range mismatch prints a unified
+diff. Treat every mismatch as a fail-closed finding: do not edit `guard.py`
+until the source, parser result, and each changed boundary in the diff are
+understood and reviewed.
 
 ## Verify from an offline copy
 
