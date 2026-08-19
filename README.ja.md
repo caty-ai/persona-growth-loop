@@ -8,7 +8,7 @@
 
 [![tests](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml/badge.svg)](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![python](https://img.shields.io/badge/python-3.14%2B-3776AB?logo=python&logoColor=white)
+![python](https://img.shields.io/badge/python-3.14.x-3776AB?logo=python&logoColor=white)
 ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20(CI)-lightgrey)
 
 Persona Growth Loop（PGL）は、毎日使う AI エージェントが実際の会話から<br>
@@ -97,7 +97,7 @@ flowchart LR
 
 | 要件 | 状態 |
 |---|---|
-| Python 3.14+（依存は PyYAML 1つ） | ✅ CI・開発とも 3.14 |
+| Python 3.14.x（UCD 16.0.0 固定）（依存は PyYAML 1つ） | ✅ CI・開発とも 3.14 |
 | macOS | ✅ 毎日の本番運用 |
 | Linux (Ubuntu) | ✅ CI でフルテストスイート実行（macOS 専用の統合テスト数件は設計上 skip・スケジューラ雛形は launchd=macOS 向け） |
 | 観測対象エージェント = Claude Code（ローカル面） | ✅ 本番稼働中 |

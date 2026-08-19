@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""Verify or emit the pinned Default_Ignorable_Code_Point corpus."""
+
+from __future__ import annotations
+
+import argparse
+import difflib
+import hashlib
+import re
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from growthlane.guard import (  # noqa: E402
+    IGNORABLE_CORPUS,
+    _BLANK_OR_NONPRINTING_STRAGGLERS,
+    _DEFAULT_IGNORABLE_RANGES,
+)
+
+
+UCD_URL = (
+    "https://www.unicode.org/Public/16.0.0/ucd/DerivedCoreProperties.txt"
+)
+UCD_SHA256 = "39d35161f2954497f69e08bdb9e701493f476a3d30222de20028feda36c1dabd"
+EXPECTED_PROPERTY_COUNT = 4_174
+EXPECTED_REVIEW_CORPUS_COUNT = 4_186
+PROPERTY = "Default_Ignorable_Code_Point"
+CODEPOINT_FIELD = re.compile(r"^[0-9A-Fa-f]{4,6}(?:\.\.[0-9A-Fa-f]{4,6})?$")
+
+
+class CorpusError(Exception):
+    """A fail-closed source or corpus validation error."""
+
+
+def _arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="regenerate the pinned Unicode default-ignorable ranges"
+    )
+    parser.add_argument(
+        "mode",
+        choices=("verify", "emit"),
+        default="verify",
+        nargs="?",
+        help="verify the checked-in ranges (default) or emit a tuple literal",
+    )
+    parser.add_argument(
+        "--from",
+        dest="source",
+        metavar="FILE",
+        type=Path,
+        help="read a local copy of the pinned UCD file instead of downloading",
+    )
+    return parser.parse_args()
+
+
+def _read_source(source: Path | None) -> bytes:
+    if source is not None:
+        try:
+            payload = source.read_bytes()
+        except OSError as exc:
+            raise CorpusError(f"cannot read {source}: {exc}") from exc
+    else:
+        try:
+            with urllib.request.urlopen(UCD_URL, timeout=30) as response:
+                payload = response.read()
+        except (OSError, urllib.error.URLError) as exc:
+            raise CorpusError(f"download failed for {UCD_URL}: {exc}") from exc
+
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest != UCD_SHA256:
+        origin = str(source) if source is not None else UCD_URL
+        raise CorpusError(
+            f"sha256 mismatch for {origin}: expected {UCD_SHA256}, got {digest}"
+        )
+    return payload
+
+
+def _parse_ranges(payload: bytes) -> tuple[tuple[int, int], ...]:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CorpusError(f"UCD input is not UTF-8: {exc}") from exc
+
+    parsed: list[tuple[int, int]] = []
+    for line_number, raw_line in enumerate(text.splitlines(), 1):
+        data = raw_line.partition("#")[0].strip()
+        if not data:
+            continue
+        fields = [field.strip() for field in data.split(";")]
+        if len(fields) < 2 or fields[1] != PROPERTY:
+            continue
+        field = fields[0]
+        if CODEPOINT_FIELD.fullmatch(field) is None:
+            raise CorpusError(
+                f"line {line_number}: invalid {PROPERTY} codepoint field {field!r}"
+            )
+        endpoints = field.split("..")
+        start = int(endpoints[0], 16)
+        end = int(endpoints[-1], 16)
+        if start > end or end > 0x10FFFF:
+            raise CorpusError(
+                f"line {line_number}: invalid {PROPERTY} range {field!r}"
+            )
+        parsed.append((start, end))
+
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(parsed):
+        if merged and start <= merged[-1][1] + 1:
+            previous_start, previous_end = merged[-1]
+            merged[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged.append((start, end))
+
+    result = tuple(merged)
+    count = sum(end - start + 1 for start, end in result)
+    if count != EXPECTED_PROPERTY_COUNT:
+        raise CorpusError(
+            f"parsed {count} {PROPERTY} codepoints; "
+            f"expected {EXPECTED_PROPERTY_COUNT}"
+        )
+    return result
+
+
+def _format_ranges(ranges: tuple[tuple[int, int], ...]) -> str:
+    lines = ["_DEFAULT_IGNORABLE_RANGES = ("]
+    lines.extend(
+        f"    (0x{start:04X}, 0x{end:04X})," for start, end in ranges
+    )
+    lines.append(")")
+    return "\n".join(lines) + "\n"
+
+
+def _validate_review_corpus() -> None:
+    count = len(IGNORABLE_CORPUS)
+    if count != EXPECTED_REVIEW_CORPUS_COUNT:
+        raise CorpusError(
+            f"checked-in review corpus has {count} codepoints; "
+            f"expected {EXPECTED_REVIEW_CORPUS_COUNT}"
+        )
+
+
+def main() -> int:
+    arguments = _arguments()
+    try:
+        ranges = _parse_ranges(_read_source(arguments.source))
+        _validate_review_corpus()
+    except CorpusError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if arguments.mode == "emit":
+        sys.stdout.write(_format_ranges(ranges))
+        return 0
+
+    if ranges != _DEFAULT_IGNORABLE_RANGES:
+        expected = _format_ranges(_DEFAULT_IGNORABLE_RANGES).splitlines(
+            keepends=True
+        )
+        actual = _format_ranges(ranges).splitlines(keepends=True)
+        sys.stdout.writelines(
+            difflib.unified_diff(
+                expected,
+                actual,
+                fromfile="growthlane/guard.py",
+                tofile="Unicode-16.0.0/DerivedCoreProperties.txt",
+            )
+        )
+        return 1
+
+    print(
+        f"stragglers: {len(_BLANK_OR_NONPRINTING_STRAGGLERS)} codepoints; "
+        f"review corpus: {len(IGNORABLE_CORPUS)} codepoints"
+    )
+    print(
+        f"match: {EXPECTED_PROPERTY_COUNT} codepoints in {len(ranges)} ranges"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
