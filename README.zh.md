@@ -209,22 +209,6 @@ PGL 是在闸门保护下、依据证据、缓慢地培养说话风格。如果�
 
 Issue 优先、契约是已冻结的文档、"完成"意味着要有证据 —— 完整规则见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
----
-
-<a id="license"></a>
-
-## 许可证
-
-[MIT](LICENSE) —— 我们希望这条流水线中的安全模式（确定性 applier、fail-closed 闸门、人格两层分离）能够被用在任何人的智能体技术栈中，所以许可证选择了不设障碍的那种。
-
----
-
-<div align="center">
-
-**仅需 Python + PyYAML** ｜ **fail-closed 设计** ｜ **soul 始终冻结**
-
-</div>
-
 <!-- family:generated:family-footer:start -->
 
 ---
@@ -245,3 +229,19 @@ Issue 优先、契约是已冻结的文档、"完成"意味着要有证据 —�
 | 横轴 | [Sitter](https://github.com/caty-ai/sitter) | 替你盯着委派出去的智能体 — 监视、留证、重启 | 已公开・MIT |
 
 <!-- family:generated:family-footer:end -->
+
+---
+
+<a id="license"></a>
+
+## 许可证
+
+[MIT](LICENSE) —— 我们希望这条流水线中的安全模式（确定性 applier、fail-closed 闸门、人格两层分离）能够被用在任何人的智能体技术栈中，所以许可证选择了不设障碍的那种。
+
+---
+
+<div align="center">
+
+**仅需 Python + PyYAML** ｜ **fail-closed 设计** ｜ **soul 始终冻结**
+
+</div>

@@ -209,22 +209,6 @@ Technical documents are currently in Japanese (the project's working language); 
 
 Issue-first, contracts are frozen documents, and completion means evidence — the full ground rules live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
----
-
-<a id="license"></a>
-
-## License
-
-[MIT](LICENSE) — we want the safety patterns in this pipeline (deterministic applier, fail-closed gates, two-plane persona split) to be reusable in anyone's agent stack, so the license gets out of the way.
-
----
-
-<div align="center">
-
-**Python + PyYAML only** ｜ **fail-closed by design** ｜ **soul stays frozen**
-
-</div>
-
 <!-- family:generated:family-footer:start -->
 
 ---
@@ -245,3 +229,19 @@ Part of the **Caty AI family** — open tools for running a family of AI agents.
 | Horizontal | [Sitter](https://github.com/caty-ai/sitter) | Babysits delegated agent runs — watches, keeps evidence, restarts | published, MIT |
 
 <!-- family:generated:family-footer:end -->
+
+---
+
+<a id="license"></a>
+
+## License
+
+[MIT](LICENSE) — we want the safety patterns in this pipeline (deterministic applier, fail-closed gates, two-plane persona split) to be reusable in anyone's agent stack, so the license gets out of the way.
+
+---
+
+<div align="center">
+
+**Python + PyYAML only** ｜ **fail-closed by design** ｜ **soul stays frozen**
+
+</div>

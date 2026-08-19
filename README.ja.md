@@ -209,22 +209,6 @@ PGL は証拠に基づいて、ゲートの内側で、ゆっくり話し方を�
 
 Issue-first・契約は凍結文書・完了は証拠つき — 流儀の全文は [CONTRIBUTING.md](CONTRIBUTING.md) にあります。
 
----
-
-<a id="license"></a>
-
-## ライセンス
-
-[MIT](LICENSE) — このパイプラインの安全パターン（決定論 applier・fail-closed ゲート・人格の2面分離）を誰のエージェント構成でも再利用してほしいので、ライセンスは一番邪魔にならないものにしています。
-
----
-
-<div align="center">
-
-**Python + PyYAML のみ** ｜ **fail-closed 設計** ｜ **soul は凍結のまま**
-
-</div>
-
 <!-- family:generated:family-footer:start -->
 
 ---
@@ -245,3 +229,19 @@ Issue-first・契約は凍結文書・完了は証拠つき — 流儀の全文�
 | 横軸 | [Sitter](https://github.com/caty-ai/sitter) | 委譲したエージェント実行の見張り番 — 監視・証拠の記録・再起動 | 公開・MIT |
 
 <!-- family:generated:family-footer:end -->
+
+---
+
+<a id="license"></a>
+
+## ライセンス
+
+[MIT](LICENSE) — このパイプラインの安全パターン（決定論 applier・fail-closed ゲート・人格の2面分離）を誰のエージェント構成でも再利用してほしいので、ライセンスは一番邪魔にならないものにしています。
+
+---
+
+<div align="center">
+
+**Python + PyYAML のみ** ｜ **fail-closed 設計** ｜ **soul は凍結のまま**
+
+</div>
