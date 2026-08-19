@@ -151,7 +151,7 @@ flowchart LR
 git clone https://github.com/caty-ai/persona-growth-loop.git
 cd persona-growth-loop
 python3 -m pip install -r requirements.txt
-python3 -m unittest discover -s tests
+make test
 ```
 
 整个过程只需几分钟，测试套件不需要联网，也不会在检出目录之外写入任何内容。除非你主动创建 [INTEGRATION.md](INTEGRATION.md) 中所说的人工管理 `gates.yml` 以及各 face 的 GO 记录，否则 PGL 无法写入任何人格文件 —— 这种默认只读并不是功能限制，而是 fail-closed 设计本身。
@@ -171,6 +171,8 @@ python3 -m unittest discover -s tests
 <a id="project-status"></a>
 
 ## 项目状态
+
+maturity: **reference** — 生产级参考实现，每晚在生产环境中运行；API 仍可能在冻结契约的范围内变动
 
 截至 2026-08-12，两个生产 face 的真实状态如下：
 

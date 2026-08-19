@@ -151,7 +151,7 @@ flowchart LR
 git clone https://github.com/caty-ai/persona-growth-loop.git
 cd persona-growth-loop
 python3 -m pip install -r requirements.txt
-python3 -m unittest discover -s tests
+make test
 ```
 
 ใช้เวลาเพียงไม่กี่นาที ชุดทดสอบไม่ต้องใช้อินเทอร์เน็ต และไม่มีการเขียนไฟล์ใด ๆ นอกโฟลเดอร์ที่ clone มา ตราบใดที่คุณยังไม่จงใจสร้าง `gates.yml` ที่มนุษย์เป็นผู้ดูแล และบันทึก GO ของแต่ละ face ตามที่อธิบายไว้ใน [INTEGRATION.md](INTEGRATION.md) PGL จะไม่สามารถเขียนไฟล์บุคลิกภาพใด ๆ ได้เลย — การตั้งค่าเริ่มต้นแบบอ่านอย่างเดียวนี้ไม่ใช่ข้อจำกัด แต่คือแก่นของการออกแบบแบบ fail-closed
@@ -171,6 +171,8 @@ python3 -m unittest discover -s tests
 <a id="project-status"></a>
 
 ## สถานะของโปรเจกต์
+
+maturity: **reference** — อิมพลีเมนเทชันอ้างอิงระดับโปรดักชันที่ทำงานทุกคืนในโปรดักชัน; API อาจยังเปลี่ยนแปลงได้ภายใต้สัญญาที่ตรึงไว้
 
 สถานะที่แท้จริงของสอง face ในโปรดักชัน ณ วันที่ 2026-08-12:
 

@@ -151,7 +151,7 @@ flowchart LR
 git clone https://github.com/caty-ai/persona-growth-loop.git
 cd persona-growth-loop
 python3 -m pip install -r requirements.txt
-python3 -m unittest discover -s tests
+make test
 ```
 
 かかるのは数分・テストにネットワーク不要・checkout の外には何も書きません。[INTEGRATION.md](INTEGRATION.md) に書かれた人間管理の `gates.yml` と面ごとの GO 記録を自分で作らない限り、PGL はどの人格ファイルにも書き込めません — この「既定で読み取り専用」は制限ではなく fail-closed 設計そのものです。
@@ -171,6 +171,8 @@ python3 -m unittest discover -s tests
 <a id="project-status"></a>
 
 ## 開発ステータス
+
+maturity: **reference** — 本番運用中の参照実装。API は凍結契約の範囲で動き得ます
 
 2026-08-12 時点の、2つの本番面の正直な状態です:
 
