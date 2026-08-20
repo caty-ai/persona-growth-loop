@@ -7,6 +7,10 @@
 # so under CI the test target provisions itself: resolve a 3.14 interpreter
 # (PATH first, then the runner tool cache), build a throwaway venv (hosted
 # macOS pythons are PEP 668 externally managed), install requirements, run.
+# The venv bin is prepended to PATH for the suite run: tests spawn bin/
+# scripts as subprocesses (#!/usr/bin/env python3), and those children must
+# resolve the same provisioned 3.14 + PyYAML, not the runner's system python
+# (this mirrors what actions/setup-python did for the pre-#17 workflow).
 # Locally (CI unset) it stays a thin unittest wrapper on your python3.
 test:
 	@if [ -n "$$CI" ]; then \
@@ -15,7 +19,7 @@ test:
 		VENV=$$(mktemp -d)/venv && \
 		"$$PY" -m venv "$$VENV" && \
 		"$$VENV/bin/python" -m pip install --quiet -r requirements.txt && \
-		"$$VENV/bin/python" -m unittest discover -s tests; \
+		PATH="$$VENV/bin:$$PATH" "$$VENV/bin/python" -m unittest discover -s tests; \
 	else \
 		python3 -m unittest discover -s tests; \
 	fi
