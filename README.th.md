@@ -6,7 +6,7 @@
 
 ![Persona Growth Loop — ให้น้ำเสียงเติบโต แต่ไม่มีวันเขียนทับจิตวิญญาณ](assets/readme/hero.png)
 
-[![tests](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml/badge.svg)](https://github.com/caty-ai/persona-growth-loop/actions/workflows/tests.yml)
+[![tests](https://github.com/caty-ai/persona-growth-loop/actions/workflows/test-lint.yml/badge.svg)](https://github.com/caty-ai/persona-growth-loop/actions/workflows/test-lint.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![python](https://img.shields.io/badge/python-3.14.x-3776AB?logo=python&logoColor=white)
 ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20(CI)-lightgrey)

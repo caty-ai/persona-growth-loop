@@ -1,10 +1,28 @@
 .PHONY: test lint
 
+# The family test-lint gate (handbook#80 reusable, wired via
+# .github/workflows/test-lint.yml) runs literal `make test` / `make lint` on
+# bare runners with no setup-python step. This repo is pinned to Python 3.14
+# (UCD 16.0.0 — the suite fails closed on unicodedata drift) and needs PyYAML,
+# so under CI the test target provisions itself: resolve a 3.14 interpreter
+# (PATH first, then the runner tool cache), build a throwaway venv (hosted
+# macOS pythons are PEP 668 externally managed), install requirements, run.
+# Locally (CI unset) it stays a thin unittest wrapper on your python3.
 test:
-	python3 -m unittest discover -s tests
+	@if [ -n "$$CI" ]; then \
+		PY=$$(command -v python3.14 || ls /opt/hostedtoolcache/Python/3.14.*/x64/bin/python3 /Users/runner/hostedtoolcache/Python/3.14.*/*/bin/python3 2>/dev/null | tail -n 1); \
+		if [ -z "$$PY" ]; then echo "error: no Python 3.14 interpreter on this runner (UCD 16.0.0 pin) — failing closed" >&2; exit 1; fi; \
+		VENV=$$(mktemp -d)/venv && \
+		"$$PY" -m venv "$$VENV" && \
+		"$$VENV/bin/python" -m pip install --quiet -r requirements.txt && \
+		"$$VENV/bin/python" -m unittest discover -s tests; \
+	else \
+		python3 -m unittest discover -s tests; \
+	fi
 
-# lint is a deliberate no-op: no linter is configured in this repo yet.
-# This target exists so the family-standard CI gate (`make test` / `make lint`)
-# can land unmodified. Replace with a real linter invocation once one is adopted.
+# Boundary-drift gate (issue #21): verify growthlane/guard.py's pinned
+# default-ignorable ranges against the checked-in UCD 16.0.0 source copy.
+# Offline (sha256 of the copy is verified by the script itself), stdlib-only,
+# version-independent (literal comparison) — runs on any modern python3.
 lint:
-	@true
+	python3 -B bin/pgl-ucd-corpus verify --from data/ucd/DerivedCoreProperties.txt

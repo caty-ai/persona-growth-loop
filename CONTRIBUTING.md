@@ -16,11 +16,13 @@ Thanks for your interest in improving Persona Growth Loop.
 
 ## Running the tests
 
-From the repository root (`make test` wraps `python3 -m unittest discover -s tests`):
+From the repository root (`make test` wraps `python3 -m unittest discover -s tests` locally and self-provisions Python 3.14 plus PyYAML in CI):
 
 ```sh
 make test
 ```
+
+`make lint` verifies the pinned UCD corpus transcription offline with `bin/pgl-ucd-corpus verify --from data/ucd/DerivedCoreProperties.txt`.
 
 The suite uses the Python standard library plus PyYAML and needs no network. All tests must pass before a pull request is reviewed. If your change alters collector filtering, gate checks, applier behavior, or the deploy dispatcher, add or extend a test that pins the new contract.
 
