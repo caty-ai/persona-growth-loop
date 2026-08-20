@@ -1,0 +1,14 @@
+# persona-growth-loop publication denylist — repo-specific forbidden patterns.
+# Format: <rule-name><TAB><python-regex> (case-insensitive by default in the checker).
+# Personal names must not appear (LICENSE is "Copyright (c) 2026 Caty" — no exception needed).
+personal-real-name-en	\bShoji\b|\bKumaru\b
+personal-real-name-ja	翔さん|翔士|翔どん
+# Narrowed to the record marker only: this repo's public contracts legitimately
+# describe the approval-gate design itself (オーナー承認 as a concept, CP-2/CP-3
+# checkpoints as published governance vocabulary, and INTEGRATION.md's in-force
+# status line uses "approved by" deliberately).
+approval-record	承認記録
+private-network-address	\b100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d+\.\d+\b
+personal-home-path	/Users/(?!runner\b)[A-Za-z0-9_]
+personal-email	[A-Za-z0-9._%+-]+@gmail\.com
+private-repository-reference	\b(?:alpha-loom|alpha-mission-control|family-vault|wip-caty-talk|claude-workspace)\b

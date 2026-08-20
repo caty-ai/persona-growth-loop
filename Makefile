@@ -28,5 +28,9 @@ test:
 # default-ignorable ranges against the checked-in UCD 16.0.0 source copy.
 # Offline (sha256 of the copy is verified by the script itself), stdlib-only,
 # version-independent (literal comparison) — runs on any modern python3.
+# Publication gate (issue #13): the checker self-test, then the gate itself
+# (repo-root denylist + personal-URL scan; stdlib-only, offline).
 lint:
 	python3 -B bin/pgl-ucd-corpus verify --from data/ucd/DerivedCoreProperties.txt
+	python3 -B tools/check_publication_gate.py --selftest
+	python3 -B tools/check_publication_gate.py --root . --account-slug shojikumaru
