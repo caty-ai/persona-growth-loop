@@ -1,0 +1,42 @@
+name: Risk Review Gate
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+permissions: {contents: read}
+concurrency: {group: 'risk-review-${{ github.event.pull_request.number }}', cancel-in-progress: true}
+jobs:
+  risk-review-gate:
+    uses: caty-ai/family-dev-handbook/.github/workflows/reusable-review-labels.yml@ci-v1
+    permissions: {contents: read, issues: read, pull-requests: write}
+    with:
+      risk_paths_billing: 'none'
+      risk_paths_outbound: |
+        adapters/**
+        vps/**
+      # gates = every enforcement/deployment surface per the repo's own taxonomy
+      # (module docstrings + component labels), not just the phrase-linter:
+      # growthlane/** carries the killswitch (gates.py), soul-baseline writer
+      # (soul.py), single-writer locks (locking.py) and deploy orchestration
+      # (deploy.py, production_anchor.py); writerd/reviewd/applier are the
+      # fail-closed proposal->approval->write chain; collectors carry the
+      # privacy scrub; classifierd steers signal classification; config/ and
+      # templates/ steer collection scope and host-deployed launchd jobs;
+      # requirements.txt is the supply-chain pin (lockfile-only PRs would
+      # otherwise pass 0-line + no-risk fully green).
+      # Left out deliberately: mirror/ (read-side drift detection outside the
+      # write path), harvester/ + aggregator/ (evidence computation upstream
+      # of the gated chain), bin/ (thin CLI wrappers over gated modules),
+      # probes/ + data/ (pinned corpus data).
+      risk_paths_gates: |
+        applier/**
+        reviewd/**
+        writerd/**
+        collectors/**
+        classifierd/**
+        growthlane/**
+        config/**
+        templates/**
+        requirements.txt
+      # auth: no authentication code exists in this repo (verified by review
+      # seats 2026-08-20); the reusable's built-in **/auth/** net stays active.
+      risk_paths_auth: 'none'
