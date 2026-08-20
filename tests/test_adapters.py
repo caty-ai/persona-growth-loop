@@ -57,7 +57,7 @@ class AdapterTests(unittest.TestCase):
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
     def test_probe_responder_uses_exact_url_and_verbatim_user_prompt(self) -> None:
-        self.write_env(".config/qwen/api.env", "QWEN_API_KEY=qwen-secret\n")  # gitleaks:allow
+        self.write_env(".config/qwen/api.env", "QWEN_API_KEY=xxxx\n")
 
         def respond(request: _common.HttpRequest) -> _common.HttpResponse:
             self.assertEqual(
@@ -215,7 +215,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.audit_events("probe_responder")[0]["outcome"], "failure")
 
     def test_probe_responder_enforces_256kib_cap_before_network(self) -> None:
-        self.write_env(".config/qwen/api.env", "QWEN_API_KEY=qwen-secret\n")  # gitleaks:allow
+        self.write_env(".config/qwen/api.env", "QWEN_API_KEY=xxxx\n")
         transport = FakeTransport(lambda request: self.fail("network should not be called"))
         with self.assertRaisesRegex(_common.AdapterFailure, "decoded block exceeds"):
             probe_responder.run(
@@ -232,7 +232,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.audit_events("probe_responder")[0]["outcome"], "failure")
 
     def test_probe_scorer_uses_exact_url_and_borderline_system_rubric(self) -> None:
-        self.write_env(".config/glm/api.env", "ZHIPU_API_KEY=glm-secret\n")  # gitleaks:allow
+        self.write_env(".config/glm/api.env", "ZHIPU_API_KEY=xxxx\n")
 
         def respond(request: _common.HttpRequest) -> _common.HttpResponse:
             self.assertEqual(request.url, "https://api.z.ai/api/anthropic/v1/messages")
@@ -493,7 +493,7 @@ class AdapterTests(unittest.TestCase):
         self.assertNotIn(":abc", encoded)
 
     def test_audit_failure_is_nonfatal(self) -> None:
-        self.write_env(".config/qwen/api.env", "QWEN_API_KEY=qwen-secret\n")  # gitleaks:allow
+        self.write_env(".config/qwen/api.env", "QWEN_API_KEY=xxxx\n")
 
         def respond(request: _common.HttpRequest) -> _common.HttpResponse:
             return _common.HttpResponse(
