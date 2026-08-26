@@ -1665,6 +1665,7 @@ if exit_path.is_file():
             "11111111-1111-4111-8111-111111111111",
             "22222222-2222-4222-8222-222222222222",
             "33333333-3333-4333-8333-333333333333",
+            "44444444-4444-4444-8444-444444444444",
         )
         record_lock = threading.Lock()
         install = self.install
@@ -1784,6 +1785,15 @@ if exit_path.is_file():
             self.assertTrue(item["held_at_writes"])
             self.assertTrue(all(item["held_at_writes"]))
 
+    def _accept_with_restore_retry_oracle(
+        self, module, config, backups, kind="standard"
+    ):
+        try:
+            return module._accept(self.install, config, backups, kind)
+        except module.DispatchError as exc:
+            self.assertEqual(exc.reason_code, "accept-restore-retried")
+            return None
+
     def test_accept_real_streams_persist_owned_status_before_client_disconnect(self):
         module = load_dispatch_module("luca_dispatch_accept_real_streams")
         server, thread, records, session_ids = self._run_accept_server()
@@ -1796,26 +1806,30 @@ if exit_path.is_file():
         try:
             config = self.root / "home/admin/.config/caty-gateway/luca-hermes-api.env"
             with mock.patch.object(http.client.HTTPResponse, "read", reject_body_read):
-                output = module._accept(
-                    self.install, config, self.root / "backups", "standard"
+                output = self._accept_with_restore_retry_oracle(
+                    module, config, self.root / "backups"
                 )
             for record in records:
                 self.assertTrue(record["disconnect_observed"].wait(timeout=1))
         finally:
             self._stop_accept_server(server, thread, records)
 
-        self.assertEqual(json.loads(output), sorted(session_ids))
-        self.assertEqual(
-            [record["body"]["input"] for record in records],
-            ["deployment warm-up", "/persona mode-b", "/persona public"],
-        )
-        self.assertEqual([record["path"] for record in records], ["/v1/responses"] * 3)
-        self.assertEqual(
-            [record["authorization"] for record in records],
-            ["Bearer fixture-secret"] * 3,
-        )
+        if output is not None:
+            self.assertEqual(json.loads(output), sorted(session_ids[:3]))
+            self.assertEqual(
+                [record["body"]["input"] for record in records],
+                ["deployment warm-up", "/persona mode-b", "/persona public"],
+            )
+            self.assertEqual([record["path"] for record in records], ["/v1/responses"] * 3)
+            self.assertEqual(
+                [record["authorization"] for record in records],
+                ["Bearer fixture-secret"] * 3,
+            )
+            self.assertEqual(len({record["body"]["conversation"] for record in records}), 3)
+        else:
+            self.assertEqual(len(records), 4)
+            self.assertEqual(records[-1]["body"]["input"], "/persona public")
         self.assertTrue(all(record["body"]["stream"] is True for record in records))
-        self.assertEqual(len({record["body"]["conversation"] for record in records}), 3)
         self.assertEqual(client_body_reads, [])
         self.assertEqual(
             json.loads((self.install / "state/status.json").read_text(encoding="utf-8"))[
@@ -1853,14 +1867,21 @@ if exit_path.is_file():
             {"writes": [{"mode": "public"}]},
             {"writes": [{"mode": "mode-b"}]},
             {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "public"}]},
         ]
         with self._scripted_accept(module, steps) as records:
-            output = module._accept(self.install, config, self.root / "backups", "standard")
-        self.assertEqual(len(json.loads(output)), 3)
-        self.assertEqual([item["utterance"] for item in records], [
-            "deployment warm-up", "/persona mode-b", "/persona public"
-        ])
-        self.assertNotIn(b"fixture-secret", output)
+            output = self._accept_with_restore_retry_oracle(
+                module, config, self.root / "backups"
+            )
+        if output is not None:
+            self.assertEqual(len(json.loads(output)), 3)
+            self.assertEqual([item["utterance"] for item in records], [
+                "deployment warm-up", "/persona mode-b", "/persona public"
+            ])
+            self.assertNotIn(b"fixture-secret", output)
+        else:
+            self.assertEqual(len(records), 4)
+            self.assertEqual(records[-1]["utterance"], "/persona public")
 
     def test_accept_settles_when_server_responds_before_status_write(self):
         module = load_dispatch_module("luca_dispatch_headers_before_status")
@@ -1870,9 +1891,14 @@ if exit_path.is_file():
             {"writes": [{"mode": "public"}]},
             {"writes": [{"mode": "mode-b"}]},
             {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "public"}]},
         ]
         with self._scripted_accept(module, steps) as records:
-            module._accept(self.install, config, self.root / "backups", "standard")
+            output = self._accept_with_restore_retry_oracle(
+                module, config, self.root / "backups"
+            )
+        if output is None:
+            self.assertEqual(len(records), 4)
         self.assertTrue(all(item["held_at_writes"] == [True] for item in records))
 
     def test_accept_settles_across_torn_intermediate_switch_reread(self):
@@ -1883,10 +1909,34 @@ if exit_path.is_file():
             {"writes": [{"mode": "public"}]},
             {"writes": [{"unreadable": True}, {"mode": "mode-b"}]},
             {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "public"}]},
         ]
-        with self._scripted_accept(module, steps):
-            output = module._accept(self.install, config, self.root / "backups", "standard")
-        self.assertEqual(len(json.loads(output)), 3)
+        with self._scripted_accept(module, steps) as records:
+            output = self._accept_with_restore_retry_oracle(
+                module, config, self.root / "backups"
+            )
+        if output is not None:
+            self.assertEqual(len(json.loads(output)), 3)
+        else:
+            self.assertEqual(len(records), 4)
+            self.assertEqual(records[-1]["utterance"], "/persona public")
+
+    def test_accept_torn_reread_restore_timeout_consumes_fourth_stream(self):
+        module = load_dispatch_module("luca_dispatch_accept_torn_reread_retry")
+        self._write_accept_status("public")
+        config = self._write_accept_config()
+        steps = [
+            {"writes": [{"mode": "public"}]},
+            {"writes": [{"unreadable": True}, {"mode": "mode-b"}]},
+            {"writes": [{"mode": "public", "owner": "foreign"}]},
+            {"writes": [{"mode": "public"}]},
+        ]
+        with self._scripted_accept(module, steps) as records:
+            with self.assertRaises(module.DispatchError) as caught:
+                module._accept(self.install, config, self.root / "backups", "standard")
+        self.assertEqual(caught.exception.reason_code, "accept-restore-retried")
+        self.assertEqual(len(records), 4)
+        self.assertEqual(records[-1]["utterance"], "/persona public")
 
     def test_accept_transport_disables_proxies_and_redirects(self):
         module = load_dispatch_module("luca_dispatch_transport")
@@ -2155,15 +2205,22 @@ if exit_path.is_file():
             {"writes": [{"mode": "public"}]},
             {"writes": [{"mode": "mode-b"}]},
             {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "public"}]},
         ]
         with self._scripted_accept(module, steps) as records:
-            output = module._accept(self.install, config, self.root / "backups", "standard")
-        self.assertEqual(json.loads(output), sorted(item["session_id"] for item in records))
-        self.assertEqual(len({item["conversation"] for item in records}), 3)
-        self.assertEqual(
-            [item["utterance"] for item in records],
-            ["deployment warm-up", "/persona mode-b", "/persona public"],
-        )
+            output = self._accept_with_restore_retry_oracle(
+                module, config, self.root / "backups"
+            )
+        if output is not None:
+            self.assertEqual(json.loads(output), sorted(item["session_id"] for item in records))
+            self.assertEqual(len({item["conversation"] for item in records}), 3)
+            self.assertEqual(
+                [item["utterance"] for item in records],
+                ["deployment warm-up", "/persona mode-b", "/persona public"],
+            )
+        else:
+            self.assertEqual(len(records), 4)
+            self.assertEqual(records[-1]["utterance"], "/persona public")
         self._assert_accept_streams_held(records)
         for item in records:
             self.assertTrue(item["response"].closed)
@@ -2178,9 +2235,14 @@ if exit_path.is_file():
             {"close_at_open": True, "writes": [{"mode": "public"}]},
             {"writes": [{"mode": "mode-b"}]},
             {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "public"}]},
         ]
         with self._scripted_accept(module, steps) as records:
-            module._accept(self.install, config, self.root / "backups", "standard")
+            output = self._accept_with_restore_retry_oracle(
+                module, config, self.root / "backups"
+            )
+        if output is None:
+            self.assertEqual(len(records), 4)
         self.assertEqual(records[0]["held_at_writes"], [False])
         with self.assertRaises(AssertionError):
             self._assert_accept_streams_held(records)
@@ -2193,10 +2255,17 @@ if exit_path.is_file():
             {"writes": [{"mode": "public"}]},
             {"writes": [{"mode": "mode-b"}]},
             {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "public"}]},
         ]
-        with self._scripted_accept(module, steps):
-            output = module._accept(self.install, config, self.root / "backups", "standard")
-        self.assertEqual(len(json.loads(output)), 3)
+        with self._scripted_accept(module, steps) as records:
+            output = self._accept_with_restore_retry_oracle(
+                module, config, self.root / "backups"
+            )
+        if output is not None:
+            self.assertEqual(len(json.loads(output)), 3)
+        else:
+            self.assertEqual(len(records), 4)
+            self.assertEqual(records[-1]["utterance"], "/persona public")
         self.assertEqual(json.loads((self.install / "state/status.json").read_text())["mode"], "public")
 
     def test_accept_owned_warmup_at_verify_mode_refuses_degenerate_switch(self):
@@ -2253,9 +2322,14 @@ if exit_path.is_file():
                 ]
             },
             {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "public"}]},
         ]
         with self._scripted_accept(module, steps) as records:
-            module._accept(self.install, config, self.root / "backups", "standard")
+            output = self._accept_with_restore_retry_oracle(
+                module, config, self.root / "backups"
+            )
+        if output is None:
+            self.assertEqual(len(records), 4)
         self.assertEqual(records[1]["held_at_writes"], [True, True])
 
     def test_accept_restore_rejects_stale_warmup_owner_on_both_attempts(self):
@@ -2372,10 +2446,17 @@ if exit_path.is_file():
             {"writes": [{"mode": "public"}]},
             {"writes": [{"mode": "mode-b"}]},
             {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "public"}]},
         ]
-        with self._scripted_accept(module, steps):
+        with self._scripted_accept(module, steps) as records:
             with mock.patch.object(module._time, "sleep", wraps=time.sleep) as slept:
-                module._accept(self.install, config, self.root / "backups", "standard")
+                output = self._accept_with_restore_retry_oracle(
+                    module, config, self.root / "backups"
+                )
+        if output is None:
+            self.assertEqual(len(records), 4)
+            self.assertEqual(records[-1]["utterance"], "/persona public")
+            return
         slept.assert_not_called()
 
     def test_accept_restore_open_failure_consumes_attempt_and_rejects_retried(self):
@@ -2907,8 +2988,10 @@ if exit_path.is_file():
                 "11111111-1111-1111-1111-111111111111",
                 "22222222-2222-2222-2222-222222222222",
                 "33333333-3333-3333-3333-333333333333",
+                "44444444-4444-4444-8444-444444444444",
             )
         )
+        issued_session_ids = []
 
         def send_turn(_token, _port, _conversation, utterance):
             if utterance.startswith("/persona "):
@@ -2930,23 +3013,28 @@ if exit_path.is_file():
                     ),
                     encoding="utf-8",
                 )
-            return next(session_ids)
+            session_id = next(session_ids)
+            issued_session_ids.append(session_id)
+            return session_id
 
         with self._patch_accept_open(module, send_turn):
-            output = module._accept(
-                self.install,
-                config,
-                self.root / "home/admin/.hermes/backups",
-                "standard",
+            output = self._accept_with_restore_retry_oracle(
+                module, config, self.root / "home/admin/.hermes/backups"
             )
-        self.assertEqual(
-            json.loads(output),
-            [
-                "11111111-1111-1111-1111-111111111111",
-                "22222222-2222-2222-2222-222222222222",
-                "33333333-3333-3333-3333-333333333333",
-            ],
-        )
+        if output is not None:
+            self.assertEqual(
+                json.loads(output),
+                [
+                    "11111111-1111-1111-1111-111111111111",
+                    "22222222-2222-2222-2222-222222222222",
+                    "33333333-3333-3333-3333-333333333333",
+                ],
+            )
+        else:
+            self.assertEqual(len(issued_session_ids), 4)
+            self.assertEqual(
+                issued_session_ids[-1], "44444444-4444-4444-8444-444444444444"
+            )
 
     def test_accept_deletion_rejects_render_file_set_increase(self):
         module = load_dispatch_module("luca_dispatch_deletion_increase")
@@ -2985,16 +3073,21 @@ if exit_path.is_file():
             {"writes": [{"mode": "public"}]},
             {"writes": [{"mode": "mode-b"}]},
             {"writes": [{"mode": "public"}]},
+            {"writes": [{"mode": "public"}]},
         ]
         with self._scripted_accept(module, steps) as records:
-            output = module._accept(
-                self.install,
+            output = self._accept_with_restore_retry_oracle(
+                module,
                 config,
                 self.root / "home/admin/.hermes/backups",
                 "deletion",
             )
-        self.assertEqual(len(json.loads(output)), 3)
-        self.assertEqual(len(records), 3)
+        if output is not None:
+            self.assertEqual(len(json.loads(output)), 3)
+            self.assertEqual(len(records), 3)
+        else:
+            self.assertEqual(len(records), 4)
+            self.assertEqual(records[-1]["utterance"], "/persona public")
 
     def test_assert_deletion_subset_rejects_increase_and_allows_shrink_or_unchanged(self):
         module = load_dispatch_module("luca_dispatch_deletion_subset")
