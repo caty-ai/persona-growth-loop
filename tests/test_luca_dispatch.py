@@ -1160,8 +1160,11 @@ if exit_path.is_file():
         )
         self.rsync_path.chmod(0o755)
         module = load_dispatch_module("luca_dispatch_transfer_cap")
-        with mock.patch.object(module, "_TRANSFER_CAP_BYTES", 16):
-            with self.assertRaises(module.DispatchError):
+        with (
+            mock.patch.object(module, "_TRANSFER_CAP_BYTES", 16),
+            mock.patch.object(module, "_RSYNC_VERSION_TIMEOUT_SECONDS", 600),
+        ):
+            with self.assertRaises(module.DispatchError) as ctx:
                 module._receive_pack(
                     self.install,
                     self.rsync_path,
@@ -1177,6 +1180,7 @@ if exit_path.is_file():
                     self.root / "home/admin/.hermes/profiles/luca/rsync-receiver.log",
                     self.root / "etc/pgl-luca-rsync-backport.json",
                 )
+        self.assertEqual(str(ctx.exception), "transfer exceeds capacity")
         module._validate_pack_tree(self.pack)
         self.assertEqual((self.pack / "catalogs/oversized.bin").stat().st_size, 32)
 
