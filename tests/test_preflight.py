@@ -81,6 +81,34 @@ class UnitEnvironmentResolutionTests(unittest.TestCase):
         self.assertEqual(result.mode, "installed-unit")
         self.assertEqual(result.path, "/unit/bin:/usr/bin")
 
+    def test_divergent_installed_unit_paths_warn_and_keep_first(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            unit_root = home / ".config/systemd/user"
+            unit_root.mkdir(parents=True)
+            first = unit_root / "ai.caty.pgl.obs-collector.service"
+            second = unit_root / "ai.caty.pgl.obs-collector-luca.service"
+            first.write_text(
+                "[Service]\nEnvironment=PATH=/first/bin:/usr/bin\n",
+                encoding="utf-8",
+            )
+            second.write_text(
+                "[Service]\nEnvironment=PATH=/second/bin:/usr/bin\n",
+                encoding="utf-8",
+            )
+            result = preflight.resolve_unit_environment(
+                python_bin=None,
+                environ={},
+                home=home,
+                host_platform="linux",
+            )
+        self.assertEqual(result.path, "/first/bin:/usr/bin")
+        self.assertEqual(result.source, str(first))
+        self.assertEqual(len(result.warnings), 1)
+        self.assertIn(first.name, result.warnings[0])
+        self.assertIn(second.name, result.warnings[0])
+        self.assertIn("diverge", result.warnings[0])
+
     def test_prospective_mode_cli_overrides_installed_unit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
@@ -259,6 +287,58 @@ class PathAndFilesystemCheckTests(unittest.TestCase):
             )
         self.assertEqual(result.status, "GREEN")
         self.assertEqual(probed, [home.resolve(), (home / "obslog").resolve()])
+        self.assertIn(str(home.resolve()), result.detail)
+        self.assertIn(str((home / "obslog").resolve()), result.detail)
+
+    def test_pgl_home_missing_path_never_probes_above_home(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "home" / "operator"
+            home.mkdir(parents=True)
+            missing = root / "missing" / "pgl"
+            probe = mock.Mock(return_value=None)
+            result = preflight.check_pgl_home(
+                missing,
+                mounts_text="",
+                permission_probe=probe,
+                home=home,
+            )
+        self.assertEqual(result.status, "UNDETERMINED")
+        self.assertIn(str(missing), result.detail)
+        self.assertIn("above HOME", result.detail)
+        self.assertEqual(preflight.exit_code_for((result,)), 2)
+        probe.assert_not_called()
+
+    def test_pgl_home_missing_child_probes_home_and_names_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            target = home / "missing" / "pgl"
+            probed: list[Path] = []
+            result = preflight.check_pgl_home(
+                target,
+                mounts_text="",
+                permission_probe=lambda path: probed.append(path),
+                home=home,
+            )
+        self.assertEqual(result.status, "GREEN")
+        self.assertEqual(probed, [home.resolve(), home.resolve()])
+        self.assertIn(str(home.resolve()), result.detail)
+
+    def test_pgl_home_existing_file_remains_red(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            pgl_home = home / "pgl-home"
+            pgl_home.write_text("not a directory\n", encoding="utf-8")
+            probe = mock.Mock(return_value=None)
+            result = preflight.check_pgl_home(
+                pgl_home,
+                mounts_text="",
+                permission_probe=probe,
+                home=home,
+            )
+        self.assertEqual(result.status, "RED")
+        self.assertIn("nearest existing ancestor is not a directory", result.detail)
+        probe.assert_not_called()
 
     def test_pgl_home_red_on_drvfs(self) -> None:
         result = preflight.check_pgl_home(
@@ -299,32 +379,67 @@ class PathAndFilesystemCheckTests(unittest.TestCase):
 
 
 class ConfigurationCheckTests(unittest.TestCase):
-    def test_host_label_green_warn_and_red(self) -> None:
+    def test_host_labels_use_shipped_defaults_and_treat_remote_face_as_info(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             alpha = root / "alpha.json"
             luca = root / "luca.json"
-            _write_json(alpha, {"face": "alpha", "host": "mbp"})
-            _write_json(luca, {"face": "luca", "host": "machine"})
-            green = preflight.check_host_labels(
-                (alpha, luca),
+            shipped_alpha = root / "shipped-alpha.json"
+            shipped_luca = root / "shipped-luca.json"
+            _write_json(alpha, {"face": "alpha", "host": "workstation-default"})
+            _write_json(
+                luca,
+                {"face": "luca", "host": "remote-default", "source": {"ssh_host": "vps"}},
+            )
+            _write_json(
+                shipped_alpha,
+                {"face": "alpha", "host": "workstation-default"},
+            )
+            _write_json(
+                shipped_luca,
+                {"face": "luca", "host": "remote-default", "source": {"ssh_host": "vps"}},
+            )
+            shipped = {"alpha": shipped_alpha, "luca": shipped_luca}
+            mac_alpha = preflight.check_host_labels(
+                (alpha,),
                 actual_hostname="machine",
                 host_platform="darwin",
+                shipped_configs=shipped,
             )
-            warning = preflight.check_host_labels(
+            linux_alpha = preflight.check_host_labels(
                 (alpha,),
                 actual_hostname="linux-box",
                 host_platform="linux",
+                shipped_configs=shipped,
+            )
+            remote_luca = preflight.check_host_labels(
+                (luca,),
+                actual_hostname="unrelated-operator-host",
+                host_platform="linux",
+                shipped_configs=shipped,
+            )
+            _write_json(alpha, {"face": "alpha", "host": "chosen-label"})
+            configured_alpha = preflight.check_host_labels(
+                (alpha,),
+                actual_hostname="different-hostname",
+                host_platform="linux",
+                shipped_configs=shipped,
             )
             _write_json(luca, {"face": "luca", "host": 42})
-            red = preflight.check_host_labels(
+            invalid = preflight.check_host_labels(
                 (luca,),
                 actual_hostname="machine",
                 host_platform="linux",
+                shipped_configs=shipped,
             )
-        self.assertEqual(green.status, "GREEN")
-        self.assertEqual(warning.status, "WARN")
-        self.assertEqual(red.status, "RED")
+        self.assertEqual(mac_alpha.status, "INFO")
+        self.assertEqual(linux_alpha.status, "WARN")
+        self.assertIn("workstation-default", linux_alpha.detail)
+        self.assertEqual(remote_luca.status, "INFO")
+        self.assertIn("comparison skipped", remote_luca.detail)
+        self.assertNotIn("unrelated-operator-host", remote_luca.detail)
+        self.assertEqual(configured_alpha.status, "INFO")
+        self.assertEqual(invalid.status, "WARN")
 
     def test_soul_alert_green_red_skip_and_undetermined(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -351,23 +466,32 @@ class ConfigurationCheckTests(unittest.TestCase):
         self.assertEqual(skipped.status, "SKIP")
         self.assertEqual(undetermined.status, "UNDETERMINED")
 
-    def test_transcripts_root_green_red_and_drvfs_warning(self) -> None:
+    def test_transcripts_root_green_empty_red_and_drvfs_warning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             transcripts = root / "transcripts"
             transcripts.mkdir()
             config = root / "growth.json"
             _write_json(config, {"transcripts_root": str(transcripts)})
+            empty = preflight.check_transcripts_roots({"alpha": config}, mounts_text="")
+            (transcripts / "session.jsonl").write_text("{}\n", encoding="utf-8")
             green = preflight.check_transcripts_roots({"alpha": config}, mounts_text="")
             _write_json(config, {"transcripts_root": str(root / "missing")})
             red = preflight.check_transcripts_roots({"alpha": config}, mounts_text="")
             _write_json(config, {"transcripts_root": "/mnt/c/transcripts"})
             PathMock = preflight.Path
-            with mock.patch.object(PathMock, "is_dir", return_value=True):
+            with mock.patch.object(PathMock, "is_dir", return_value=True), mock.patch.object(
+                PathMock,
+                "iterdir",
+                return_value=iter((Path("session.jsonl"),)),
+            ):
                 warning = preflight.check_transcripts_roots(
                     {"alpha": config},
                     mounts_text="C: /mnt/c drvfs rw 0 0\n",
                 )
+        self.assertEqual(empty.status, "WARN")
+        self.assertIn("no transcripts found", empty.detail)
+        self.assertIn("Windows side", empty.detail)
         self.assertEqual(green.status, "GREEN")
         self.assertEqual(red.status, "RED")
         self.assertEqual(warning.status, "WARN")
@@ -386,8 +510,38 @@ class ConfigurationCheckTests(unittest.TestCase):
         red = preflight.check_no_spaces(
             {"PGL_REPO": "/repo with spaces", "PGL_HOME": "/home/pgl"}
         )
+        colon = preflight.check_no_spaces(
+            {"PGL_REPO": "/repo", "PGL_HOME": "/home/pgl", "PYTHON_BIN": "/venv:bad/bin"}
+        )
         self.assertEqual(green.status, "GREEN")
         self.assertEqual(red.status, "RED")
+        self.assertEqual(colon.status, "RED")
+        self.assertIn("colons", colon.detail)
+
+
+class ExitCodeContractTests(unittest.TestCase):
+    def test_exit_zero_when_all_results_are_determined_and_none_are_red(self) -> None:
+        results = (
+            preflight.CheckResult("green", "GREEN", "ok"),
+            preflight.CheckResult("warn", "WARN", "advisory"),
+            preflight.CheckResult("info", "INFO", "context"),
+            preflight.CheckResult("skip", "SKIP", "not applicable"),
+        )
+        self.assertEqual(preflight.exit_code_for(results), 0)
+
+    def test_exit_one_when_any_result_is_red(self) -> None:
+        results = (
+            preflight.CheckResult("unknown", "UNDETERMINED", "unknown"),
+            preflight.CheckResult("failure", "RED", "failed"),
+        )
+        self.assertEqual(preflight.exit_code_for(results), 1)
+
+    def test_exit_two_when_no_result_is_red_and_one_is_undetermined(self) -> None:
+        results = (
+            preflight.CheckResult("warning", "WARN", "advisory"),
+            preflight.CheckResult("unknown", "UNDETERMINED", "unknown"),
+        )
+        self.assertEqual(preflight.exit_code_for(results), 2)
 
 
 class SchedulerCheckTests(unittest.TestCase):

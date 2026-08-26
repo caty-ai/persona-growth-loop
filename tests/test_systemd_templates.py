@@ -89,6 +89,33 @@ def _plist(job: str) -> dict[str, object]:
         return plistlib.load(handle)
 
 
+def _calendar_from_plist(interval: dict) -> str:
+    hour = int(interval["Hour"])
+    minute = int(interval["Minute"])
+    time_value = f"{hour:02d}:{minute:02d}:00"
+    if "Weekday" not in interval:
+        return f"*-*-* {time_value}"
+    weekday = int(interval["Weekday"])
+    names = {
+        0: "Sun",
+        1: "Mon",
+        2: "Tue",
+        3: "Wed",
+        4: "Thu",
+        5: "Fri",
+        6: "Sat",
+        7: "Sun",
+    }
+    if weekday not in names:
+        raise ValueError(f"unsupported launchd Weekday: {weekday}")
+    return f"{names[weekday]} *-*-* {time_value}"
+
+
+def _calendar_minutes(calendar: str) -> int:
+    hour, minute, _ = map(int, calendar.rsplit(" ", 1)[1].split(":"))
+    return hour * 60 + minute
+
+
 def _render(path: Path, root: Path) -> tuple[str, Path, Path, Path]:
     repo = REPO
     home = root / "pgl-home"
@@ -146,6 +173,12 @@ class SystemdTemplateTests(unittest.TestCase):
                     ),
                     1,
                 )
+                for directive in ("ExecStart", "StandardOutput", "StandardError"):
+                    self.assertEqual(
+                        len(_directives(service_path, "Service", directive)),
+                        1,
+                        f"{service_path.name} must contain exactly one {directive}=",
+                    )
 
     def test_weekly_services_pin_per_face_ordering(self) -> None:
         for job, collector in ORDERING.items():
@@ -174,6 +207,7 @@ class SystemdTemplateTests(unittest.TestCase):
                         prefix = paths[0][: -len(SYSTEM_PATH_SUFFIX)]
                         self.assertTrue(Path(prefix).is_absolute())
                         self.assertNotRegex(prefix, r"\s")
+                        self.assertNotIn(":", prefix)
                         self.assertIn(f"PGL_HOME={home}", values)
                         self.assertIn(f"WorkingDirectory={repo}", rendered)
 
@@ -187,6 +221,10 @@ class SystemdTemplateTests(unittest.TestCase):
                 timer = _parser(timer_path)
                 self.assertEqual(plist["StartCalendarInterval"], expected["plist"])
                 self.assertEqual(timer["Timer"]["OnCalendar"], expected["calendar"])
+                self.assertEqual(
+                    timer["Timer"]["OnCalendar"],
+                    _calendar_from_plist(plist["StartCalendarInterval"]),
+                )
                 self.assertEqual(
                     shlex.split(service["Service"]["ExecStart"]),
                     plist["ProgramArguments"],
@@ -213,10 +251,14 @@ class SystemdTemplateTests(unittest.TestCase):
             ("obs-collector", "mirror-weekly"),
             ("obs-collector-luca", "mirror-weekly-luca"),
         ):
-            collector = JOBS[collector_job]["plist"]
-            weekly = JOBS[weekly_job]["plist"]
-            headroom = weekly["Hour"] * 60 + weekly["Minute"] - (
-                collector["Hour"] * 60 + collector["Minute"]
+            collector_calendar = _parser(
+                SYSTEMD / f"ai.caty.pgl.{collector_job}.timer"
+            )["Timer"]["OnCalendar"]
+            weekly_calendar = _parser(
+                SYSTEMD / f"ai.caty.pgl.{weekly_job}.timer"
+            )["Timer"]["OnCalendar"]
+            headroom = _calendar_minutes(weekly_calendar) - _calendar_minutes(
+                collector_calendar
             )
             self.assertGreaterEqual(headroom, MIN_HEADROOM_MINUTES)
 

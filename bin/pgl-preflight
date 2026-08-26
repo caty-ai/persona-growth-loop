@@ -65,6 +65,7 @@ class UnitEnvironment:
     path: str
     source: str
     python_bin: str | None = None
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,10 @@ class PythonRuntime:
     executable: str
     python_version: str
     ucd_version: str
+
+
+class ProbeAboveHomeError(RuntimeError):
+    """A missing target would require probing an ancestor above HOME."""
 
 
 def _systemd_path(service: Path) -> str | None:
@@ -125,30 +130,41 @@ def resolve_unit_environment(
 
     if host_platform.startswith("linux"):
         unit_root = home / ".config" / "systemd" / "user"
+        installed: list[tuple[Path, str]] = []
         for label in _UNIT_LABELS:
             service = unit_root / f"{label}.service"
             installed_path = _systemd_path(service)
             if installed_path is not None:
-                return UnitEnvironment(
-                    mode="installed-unit",
-                    path=installed_path,
-                    source=str(service),
-                    python_bin=installed_path.split(":", 1)[0],
-                )
+                installed.append((service, installed_path))
         default_path = LINUX_DEFAULT_PATH
     else:
         unit_root = home / "Library" / "LaunchAgents"
+        installed = []
         for label in _UNIT_LABELS:
             plist_path = unit_root / f"{label}.plist"
             installed_path = _launchd_path(plist_path)
             if installed_path is not None:
-                return UnitEnvironment(
-                    mode="installed-unit",
-                    path=installed_path,
-                    source=str(plist_path),
-                    python_bin=installed_path.split(":", 1)[0],
-                )
+                installed.append((plist_path, installed_path))
         default_path = MACOS_DEFAULT_PATH
+
+    if installed:
+        first_unit, first_path = installed[0]
+        warnings: tuple[str, ...] = ()
+        if len({path_value for _, path_value in installed}) > 1:
+            details = "; ".join(
+                f"{unit.name}={path_value}" for unit, path_value in installed
+            )
+            warnings = (
+                f"installed unit PATH values diverge: {details}; "
+                f"using {first_unit.name} for resolution",
+            )
+        return UnitEnvironment(
+            mode="installed-unit",
+            path=first_path,
+            source=str(first_unit),
+            python_bin=first_path.split(":", 1)[0],
+            warnings=warnings,
+        )
 
     return UnitEnvironment(
         mode="undetermined",
@@ -318,13 +334,19 @@ def is_drvfs(path: Path, *, mounts_text: str | None = None) -> bool:
     return len(parts) >= 3 and parts[1] == "mnt" and len(parts[2]) == 1
 
 
-def _nearest_existing_directory(path: Path) -> Path:
+def _nearest_existing_directory(path: Path, *, home: Path | None = None) -> Path:
     candidate = path.expanduser().resolve(strict=False)
+    home = (home or Path.home()).expanduser().resolve(strict=False)
     while not candidate.exists():
         parent = candidate.parent
         if parent == candidate:
             break
         candidate = parent
+    if candidate != home and candidate in home.parents:
+        raise ProbeAboveHomeError(
+            f"missing path {path.expanduser().resolve(strict=False)} has no existing "
+            f"ancestor at or below HOME={home}"
+        )
     if not candidate.is_dir():
         raise RuntimeError(f"nearest existing ancestor is not a directory: {candidate}")
     return candidate
@@ -379,14 +401,22 @@ def check_pgl_home(
     *,
     mounts_text: str | None = None,
     permission_probe: Callable[[Path], str | None] = _probe_permissions,
+    home: Path | None = None,
 ) -> CheckResult:
     targets = (pgl_home, pgl_home / "obslog")
+    probed: list[Path] = []
     for target in targets:
         if is_drvfs(target, mounts_text=mounts_text):
             return CheckResult("pgl-home", "RED", f"{target} is on drvfs; use WSL ext4")
         try:
-            probe_root = _nearest_existing_directory(target)
+            probe_root = _nearest_existing_directory(target, home=home)
             problem = permission_probe(probe_root)
+        except ProbeAboveHomeError as exc:
+            return CheckResult(
+                "pgl-home",
+                "UNDETERMINED",
+                f"cannot determine permission fidelity without probing above HOME: {exc}",
+            )
         except RuntimeError as exc:
             return CheckResult("pgl-home", "RED", str(exc))
         if problem is not None:
@@ -395,10 +425,12 @@ def check_pgl_home(
                 "RED",
                 f"permission fidelity probe for {target} via {probe_root} failed: {problem}",
             )
+        probed.append(probe_root)
+    probe_detail = "; ".join(str(probe_root) for probe_root in probed)
     return CheckResult(
         "pgl-home",
         "GREEN",
-        f"POSIX 0600/0700 probes passed for {pgl_home} and {pgl_home / 'obslog'}",
+        f"POSIX 0600/0700 probes passed: {probe_detail}",
     )
 
 
@@ -427,26 +459,62 @@ def check_host_labels(
     *,
     actual_hostname: str,
     host_platform: str,
+    shipped_configs: Mapping[str, Path] | None = None,
 ) -> CheckResult:
+    shipped_configs = shipped_configs or {
+        "alpha": REPO_ROOT / "config" / "obs-collector.json",
+        "luca": REPO_ROOT / "config" / "obs-collector-luca.json",
+    }
     warnings: list[str] = []
+    information: list[str] = []
+    faces: list[str] = []
     try:
+        shipped: dict[str, dict[str, object]] = {
+            face: _load_json(path) for face, path in shipped_configs.items()
+        }
+        local_default = shipped.get("alpha", {}).get("host")
+        if not isinstance(local_default, str) or not local_default:
+            raise ValueError("shipped alpha collector host must be a non-empty string")
         for config_path in collector_configs:
             payload = _load_json(config_path)
             face = payload.get("face", config_path.stem)
+            if not isinstance(face, str) or not face:
+                raise ValueError(f"{config_path}: face must be a non-empty string")
+            faces.append(face)
             configured = payload.get("host")
             if not isinstance(configured, str) or not configured:
                 raise ValueError(f"{config_path}: host must be a non-empty string")
-            if configured == "mbp" and host_platform == "darwin":
-                continue
-            if configured == "mbp":
-                warnings.append(f"{face}=mbp is the shipped macOS label")
-            elif configured != actual_hostname:
-                warnings.append(f"{face}={configured}, actual hostname={actual_hostname}")
+            shipped_payload = shipped.get(face)
+            if shipped_payload is None:
+                raise ValueError(f"no shipped collector config for face={face}")
+            shipped_default = shipped_payload.get("host")
+            if not isinstance(shipped_default, str) or not shipped_default:
+                raise ValueError(f"shipped {face} collector host must be a non-empty string")
+            source = shipped_payload.get("source")
+            is_remote = shipped_default != local_default or (
+                isinstance(source, dict) and isinstance(source.get("ssh_host"), str)
+            )
+            if is_remote:
+                information.append(
+                    f"{face}={configured} is a remote-source label; local hostname comparison skipped"
+                )
+            elif configured == shipped_default and host_platform != "darwin":
+                warnings.append(
+                    f"{face}={configured} is the shipped default on Linux; choose a deployment label"
+                )
+            elif configured == shipped_default:
+                information.append(f"{face}={configured} shipped default accepted on macOS")
+            else:
+                information.append(
+                    f"{face}={configured} is operator-configured (local hostname={actual_hostname})"
+                )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        return CheckResult("host-label", "RED", str(exc))
+        return CheckResult("host-label", "WARN", str(exc))
+    name = f"host-label-{faces[0]}" if len(faces) == 1 else "host-label"
+    detail = "; ".join(warnings + information)
     if warnings:
-        return CheckResult("host-label", "WARN", "; ".join(warnings))
-    return CheckResult("host-label", "GREEN", f"collector labels match {actual_hostname}")
+        return CheckResult(name, "WARN", detail)
+    return CheckResult(name, "INFO", detail)
 
 
 def check_soul_alert(
@@ -506,6 +574,11 @@ def check_transcripts_roots(
             if not root.is_dir():
                 raise ValueError(f"{face} transcripts_root is not a directory: {root}")
             configured.append(f"{face}={root}")
+            if not any(root.iterdir()):
+                warnings.append(
+                    f"{face}={root}: no transcripts found — on WSL2 your transcripts may live "
+                    "on the Windows side"
+                )
             if is_drvfs(root, mounts_text=mounts_text):
                 warnings.append(
                     f"{face}={root} is on drvfs; your transcripts likely live on the Windows side"
@@ -603,14 +676,31 @@ def check_scheduler(
 
 
 def check_no_spaces(paths: Mapping[str, Path | str | None]) -> CheckResult:
-    offenders = [f"{name}={value}" for name, value in paths.items() if value is not None and any(c.isspace() for c in str(value))]
+    offenders = [
+        f"{name}={value}"
+        for name, value in paths.items()
+        if value is not None and any(c.isspace() or c == ":" for c in str(value))
+    ]
     if offenders:
         return CheckResult(
             "no-spaces",
             "RED",
-            "systemd ExecStart rendering requires paths without whitespace: " + "; ".join(offenders),
+            "systemd rendering requires paths without whitespace or colons: "
+            + "; ".join(offenders),
         )
-    return CheckResult("no-spaces", "GREEN", "PGL_REPO, PGL_HOME, and configured PYTHON_BIN contain no spaces")
+    return CheckResult(
+        "no-spaces",
+        "GREEN",
+        "PGL_REPO, PGL_HOME, and configured PYTHON_BIN contain no spaces or colons",
+    )
+
+
+def exit_code_for(results: Sequence[CheckResult]) -> int:
+    if any(result.status == "RED" for result in results):
+        return 1
+    if any(result.status == "UNDETERMINED" for result in results):
+        return 2
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -637,6 +727,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"[INFO] environment: mode={environment.mode}; source={environment.source}; "
         f"PATH={environment.path}"
     )
+    for warning in environment.warnings:
+        print(f"[WARN] environment: {warning}")
     ucd = check_ucd(environment)
     print(ucd.render())
     print(ambient_ucd_line(os.environ))
@@ -650,10 +742,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         check_pgl_home(pgl_home),
         check_logs(pgl_home),
         check_host_labels(
-            (
-                REPO_ROOT / "config" / "obs-collector.json",
-                REPO_ROOT / "config" / "obs-collector-luca.json",
-            ),
+            (REPO_ROOT / "config" / "obs-collector.json",),
+            actual_hostname=socket.gethostname(),
+            host_platform=host_platform,
+        ),
+        check_host_labels(
+            (REPO_ROOT / "config" / "obs-collector-luca.json",),
             actual_hostname=socket.gethostname(),
             host_platform=host_platform,
         ),
@@ -685,7 +779,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ]
     for result in checks:
         print(result.render())
-    return 1 if ucd.failed or any(result.failed for result in checks) else 0
+    return exit_code_for((ucd, *checks))
 
 
 if __name__ == "__main__":

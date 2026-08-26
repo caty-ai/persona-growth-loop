@@ -5,9 +5,10 @@ or an always-on Linux host. The templates cover the alpha and Luca observation
 collectors and weekly mirrors. Nightly growth-lane units remain host-authored;
 the repository deliberately does not ship them.
 
-The commands below require paths without spaces. systemd splits the unquoted
-`ExecStart` template argv, so choose whitespace-free values for `PGL_REPO`,
-`PGL_HOME`, and `PGL_PYTHON_BIN`.
+The commands below require paths without spaces or colons. systemd splits the
+unquoted `ExecStart` template argv, and colons delimit PATH entries, so choose
+values containing neither character for `PGL_REPO`, `PGL_HOME`, and
+`PGL_PYTHON_BIN`.
 
 ## 0. Run preflight first
 
@@ -26,6 +27,15 @@ prospective or installed-unit mode is authoritative. Compare its resolved
 `sys.executable` line with the separately labelled ambient-shell line. Fix every
 RED before enabling timers. WARN and SKIP lines describe operator decisions or
 checks that do not apply on that host.
+
+The exit-code contract is: 0 when every result is determined and none is RED,
+1 when any result is RED, and 2 when no result is RED but at least one is
+UNDETERMINED. Scripted `pgl-preflight && ...` chains therefore treat exit 2 as a
+failure by design; supply `--python-bin` or install the units before using such
+a chain as an enablement gate.
+
+A missing PGL path with no existing ancestor at or below `$HOME` is also
+UNDETERMINED: preflight will not probe a directory above `$HOME`.
 
 ## Platform prerequisites
 
@@ -100,16 +110,19 @@ sudo timedatectl set-timezone Asia/Tokyo
 timedatectl status
 ```
 
-Edit each collector config's `host` label to the provenance label chosen for
-this machine. The shipped alpha value `mbp` always warns on Linux, and any label
-different from the actual hostname warns so the operator can confirm the choice.
+Edit the alpha collector config's `host` label to the provenance label chosen
+for this machine. Leaving its shipped default in place warns on Linux and is
+suppressed on macOS. Luca describes a remote SSH/dispatch source, so preflight
+reports its shipped remote label as INFO and does not compare it with the local
+operator hostname.
 
-Confirm every non-empty `transcripts_root` exists. A path on drvfs produces a
-warning because the transcripts probably live on the Windows side. The shipped
-`soul_alert_argv` is empty, so preflight reports SKIP until an operator installs
-and configures an alert command. The repository does not ship `tg-send`. Re-run
-preflight after wiring any alert command so argv[0] is resolved through the unit
-PATH rather than the ambient shell PATH.
+Confirm every non-empty `transcripts_root` exists and contains transcripts. An
+empty directory warns that WSL2 transcripts may live on the Windows side. A path
+on drvfs produces the same operational warning. The shipped `soul_alert_argv`
+is empty, so preflight reports SKIP until an operator installs and configures an
+alert command. The repository does not ship `tg-send`. Re-run preflight after
+wiring any alert command so argv[0] is resolved through the unit PATH rather
+than the ambient shell PATH.
 
 ## Render and install the user units
 
@@ -122,7 +135,7 @@ PGL_HOME="$HOME/.persona-growth-loop"
 PGL_PYTHON_BIN="$HOME/.local/share/pgl-venv/bin"
 install -d -m 700 "$PGL_HOME/logs" "$HOME/.config/systemd/user"
 
-for template in "$PGL_REPO"/templates/systemd/*.{service,timer}; do
+for template in "$PGL_REPO"/templates/systemd/*.service "$PGL_REPO"/templates/systemd/*.timer; do
   unit="$HOME/.config/systemd/user/$(basename "$template")"
   sed -e "s|__PGL_REPO__|$PGL_REPO|g" \
       -e "s|__PGL_HOME__|$PGL_HOME|g" \
@@ -132,11 +145,11 @@ done
 
 if grep -R '__PGL_[A-Z_]*__' "$HOME/.config/systemd/user"/ai.caty.pgl.*; then
   echo 'unrendered PGL placeholder' >&2
-  exit 1
+  false
 fi
 
 python3 -B "$PGL_REPO/bin/pgl-preflight"
-systemd-analyze --user verify "$HOME/.config/systemd/user"/ai.caty.pgl.{obs-collector,obs-collector-luca,mirror-weekly,mirror-weekly-luca}.{service,timer}
+systemd-analyze verify "$HOME/.config/systemd/user"/ai.caty.pgl.*.service "$HOME/.config/systemd/user"/ai.caty.pgl.*.timer
 systemctl --user daemon-reload
 systemctl --user enable --now \
   ai.caty.pgl.obs-collector.timer \
@@ -146,10 +159,16 @@ systemctl --user enable --now \
 loginctl enable-linger "$USER"
 ```
 
+`systemd-analyze verify` is a static structure check of the rendered files; it
+does not require a running user manager.
+
 The weekly services carry `After=` and `Wants=` for their own face's collector
 service. When overdue timers are coalesced at startup, this orders the collector
 before its weekly mirror. The schedules retain at least 60 minutes of ordinary
-collector-to-weekly headroom.
+collector-to-weekly headroom. On normal weeks, when the VM is up and the
+collector already ran at 00:05, the weekly service's `Wants=` re-activates the
+collector immediately before the mirror. That extra run is harmless—the
+collector atomically replaces the day's records—and guarantees a fresh marker.
 
 The host-authored nightly units, if enabled, use 00:15 for alpha and 04:00 for
 Luca. Keep their services and timers outside `templates/systemd/`; validate their
