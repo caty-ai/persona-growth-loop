@@ -1,0 +1,692 @@
+#!/usr/bin/env python3
+"""Read-only scheduler-environment checks for Persona Growth Loop operators."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import plistlib
+import shlex
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Mapping, Sequence
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from growthlane.deploy import require_collector_path_agreement
+from growthlane.guard import IGNORABLE_CORPUS_UNICODE_VERSION
+
+
+# The leading colon is intentional: renderers prepend exactly one interpreter
+# bin directory. Tests import this constant from this executable so the suffix
+# has one source without adding a runtime package module.
+SYSTEM_PATH_SUFFIX = ":/usr/local/bin:/usr/bin:/bin"
+MACOS_DEFAULT_PATH = "/opt/homebrew/bin" + SYSTEM_PATH_SUFFIX
+LINUX_DEFAULT_PATH = SYSTEM_PATH_SUFFIX[1:]
+
+_UNIT_LABELS = (
+    "ai.caty.pgl.obs-collector",
+    "ai.caty.pgl.obs-collector-luca",
+    "ai.caty.pgl.mirror-weekly",
+    "ai.caty.pgl.mirror-weekly-luca",
+)
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    name: str
+    status: str
+    detail: str
+
+    @property
+    def failed(self) -> bool:
+        return self.status == "RED"
+
+    def render(self) -> str:
+        return f"[{self.status}] {self.name}: {self.detail}"
+
+
+@dataclass(frozen=True)
+class UnitEnvironment:
+    mode: str
+    path: str
+    source: str
+    python_bin: str | None = None
+
+
+@dataclass(frozen=True)
+class PythonRuntime:
+    executable: str
+    python_version: str
+    ucd_version: str
+
+
+def _systemd_path(service: Path) -> str | None:
+    try:
+        lines = service.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("Environment="):
+            continue
+        try:
+            values = shlex.split(stripped.removeprefix("Environment="))
+        except ValueError:
+            continue
+        for value in values:
+            if value.startswith("PATH="):
+                return value.removeprefix("PATH=")
+    return None
+
+
+def _launchd_path(plist_path: Path) -> str | None:
+    try:
+        with plist_path.open("rb") as handle:
+            payload = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException):
+        return None
+    environment = payload.get("EnvironmentVariables")
+    if not isinstance(environment, dict):
+        return None
+    value = environment.get("PATH")
+    return value if isinstance(value, str) and value else None
+
+
+def resolve_unit_environment(
+    *,
+    python_bin: str | None,
+    environ: Mapping[str, str],
+    home: Path,
+    host_platform: str,
+) -> UnitEnvironment:
+    supplied = python_bin or environ.get("PGL_PYTHON_BIN")
+    if supplied:
+        expanded = os.path.abspath(os.path.expanduser(supplied))
+        return UnitEnvironment(
+            mode="prospective",
+            path=expanded + SYSTEM_PATH_SUFFIX,
+            source="--python-bin" if python_bin else "PGL_PYTHON_BIN",
+            python_bin=expanded,
+        )
+
+    if host_platform.startswith("linux"):
+        unit_root = home / ".config" / "systemd" / "user"
+        for label in _UNIT_LABELS:
+            service = unit_root / f"{label}.service"
+            installed_path = _systemd_path(service)
+            if installed_path is not None:
+                return UnitEnvironment(
+                    mode="installed-unit",
+                    path=installed_path,
+                    source=str(service),
+                    python_bin=installed_path.split(":", 1)[0],
+                )
+        default_path = LINUX_DEFAULT_PATH
+    else:
+        unit_root = home / "Library" / "LaunchAgents"
+        for label in _UNIT_LABELS:
+            plist_path = unit_root / f"{label}.plist"
+            installed_path = _launchd_path(plist_path)
+            if installed_path is not None:
+                return UnitEnvironment(
+                    mode="installed-unit",
+                    path=installed_path,
+                    source=str(plist_path),
+                    python_bin=installed_path.split(":", 1)[0],
+                )
+        default_path = MACOS_DEFAULT_PATH
+
+    return UnitEnvironment(
+        mode="undetermined",
+        path=default_path,
+        source="unit not installed — checked against the platform default PATH",
+    )
+
+
+def probe_python(
+    path_value: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> PythonRuntime:
+    code = (
+        "import json,platform,sys,unicodedata;"
+        "print(json.dumps({'executable':sys.executable,"
+        "'python_version':platform.python_version(),"
+        "'ucd_version':unicodedata.unidata_version}))"
+    )
+    completed = runner(
+        ["/usr/bin/env", "python3", "-c", code],
+        env={"PATH": path_value},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RuntimeError(detail or f"python3 exited {completed.returncode}")
+    try:
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
+        executable = payload["executable"]
+        python_version = payload["python_version"]
+        ucd_version = payload["ucd_version"]
+    except (IndexError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("python3 returned malformed runtime metadata") from exc
+    if not all(isinstance(value, str) and value for value in (executable, python_version, ucd_version)):
+        raise RuntimeError("python3 returned malformed runtime metadata")
+    return PythonRuntime(executable, python_version, ucd_version)
+
+
+def check_ucd(
+    unit_environment: UnitEnvironment,
+    *,
+    required: str = IGNORABLE_CORPUS_UNICODE_VERSION,
+    probe: Callable[[str], PythonRuntime] = probe_python,
+) -> CheckResult:
+    if unit_environment.mode == "undetermined":
+        return CheckResult(
+            "ucd",
+            "UNDETERMINED",
+            "mode=undetermined; cannot determine the scheduled interpreter — "
+            "supply --python-bin or install the units",
+        )
+    try:
+        runtime = probe(unit_environment.path)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        return CheckResult(
+            "ucd",
+            "RED",
+            f"mode={unit_environment.mode}; cannot run python3 through unit PATH: {exc}",
+        )
+    common = (
+        f"mode={unit_environment.mode}; resolved {runtime.executable}; "
+        f"observed unidata_version '{runtime.ucd_version}', required '{required}'"
+    )
+    if runtime.ucd_version != required:
+        return CheckResult(
+            "ucd",
+            "RED",
+            f"{common}; need CPython 3.14.x (UCD 16.0.0), "
+            f"observed Python {runtime.python_version}",
+        )
+    return CheckResult(
+        "ucd",
+        "GREEN",
+        f"{common}; CPython {runtime.python_version}",
+    )
+
+
+def ambient_ucd_line(
+    environ: Mapping[str, str],
+    *,
+    probe: Callable[[str], PythonRuntime] = probe_python,
+) -> str:
+    ambient_path = environ.get("PATH", os.defpath)
+    try:
+        runtime = probe(ambient_path)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        return f"[INFO] ucd ambient-shell: python3 unavailable: {exc}"
+    return (
+        f"[INFO] ucd ambient-shell: resolved {runtime.executable}; "
+        f"observed unidata_version '{runtime.ucd_version}'; "
+        f"Python {runtime.python_version}"
+    )
+
+
+def _load_json(path: Path) -> dict[str, object]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("root must be an object")
+    return payload
+
+
+def _configured_path(payload: Mapping[str, object], key: str) -> Path:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{key} must be a non-empty string")
+    return Path(value).expanduser().resolve(strict=False)
+
+
+def check_paths(
+    pgl_home: Path,
+    alpha_collector_config: Path,
+    luca_collector_config: Path,
+    *,
+    agreement_check: Callable[[Path, Path], tuple[Path, Path]] = require_collector_path_agreement,
+) -> CheckResult:
+    expected = pgl_home.expanduser().resolve(strict=False)
+    try:
+        alpha = _configured_path(_load_json(alpha_collector_config), "obs_root")
+        if alpha != expected:
+            raise RuntimeError(f"alpha obs_root={alpha} differs from PGL_HOME={expected}")
+        luca_root, _ = agreement_check(expected, luca_collector_config)
+        if luca_root != expected:
+            raise RuntimeError(f"luca obs_root={luca_root} differs from PGL_HOME={expected}")
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        return CheckResult("paths", "RED", str(exc))
+    return CheckResult(
+        "paths",
+        "GREEN",
+        f"alpha and luca collector state paths agree with PGL_HOME={expected}",
+    )
+
+
+def _mount_entries(text: str) -> list[tuple[Path, str, str]]:
+    entries: list[tuple[Path, str, str]] = []
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) >= 4:
+            entries.append((Path(fields[1].replace("\\040", " ")), fields[2], fields[3]))
+    return entries
+
+
+def is_drvfs(path: Path, *, mounts_text: str | None = None) -> bool:
+    resolved = path.expanduser().resolve(strict=False)
+    if mounts_text is None:
+        try:
+            mounts_text = Path("/proc/mounts").read_text(encoding="utf-8")
+        except OSError:
+            mounts_text = ""
+    best: tuple[Path, str, str] | None = None
+    for entry in _mount_entries(mounts_text):
+        mount, file_system, options = entry
+        try:
+            resolved.relative_to(mount)
+        except ValueError:
+            continue
+        if best is None or len(mount.parts) > len(best[0].parts):
+            best = entry
+    if best is not None:
+        _, file_system, options = best
+        if file_system == "drvfs" or "aname=drvfs" in options:
+            return True
+    parts = resolved.parts
+    return len(parts) >= 3 and parts[1] == "mnt" and len(parts[2]) == 1
+
+
+def _nearest_existing_directory(path: Path) -> Path:
+    candidate = path.expanduser().resolve(strict=False)
+    while not candidate.exists():
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+    if not candidate.is_dir():
+        raise RuntimeError(f"nearest existing ancestor is not a directory: {candidate}")
+    return candidate
+
+
+def _probe_permissions(directory: Path) -> str | None:
+    file_descriptor = -1
+    file_name: str | None = None
+    directory_name: str | None = None
+    problem: str | None = None
+    cleanup_problems: list[str] = []
+    try:
+        file_descriptor, file_name = tempfile.mkstemp(prefix=".pgl-preflight-", dir=directory)
+        os.close(file_descriptor)
+        file_descriptor = -1
+        os.chmod(file_name, 0o600)
+        file_mode = stat.S_IMODE(os.stat(file_name).st_mode)
+        if file_mode != 0o600:
+            problem = f"file chmod 0600 read back as {file_mode:04o}"
+        else:
+            directory_name = tempfile.mkdtemp(prefix=".pgl-preflight-", dir=directory)
+            os.chmod(directory_name, 0o700)
+            directory_mode = stat.S_IMODE(os.stat(directory_name).st_mode)
+            if directory_mode != 0o700:
+                problem = f"directory chmod 0700 read back as {directory_mode:04o}"
+    except OSError as exc:
+        problem = str(exc)
+    finally:
+        if file_descriptor >= 0:
+            try:
+                os.close(file_descriptor)
+            except OSError as exc:
+                cleanup_problems.append(f"close failed: {exc}")
+        if file_name is not None:
+            try:
+                os.unlink(file_name)
+            except OSError as exc:
+                cleanup_problems.append(f"file cleanup failed: {exc}")
+        if directory_name is not None:
+            try:
+                os.rmdir(directory_name)
+            except OSError as exc:
+                cleanup_problems.append(f"directory cleanup failed: {exc}")
+    if cleanup_problems:
+        cleanup_detail = "; ".join(cleanup_problems)
+        return f"{problem}; {cleanup_detail}" if problem else cleanup_detail
+    return problem
+
+
+def check_pgl_home(
+    pgl_home: Path,
+    *,
+    mounts_text: str | None = None,
+    permission_probe: Callable[[Path], str | None] = _probe_permissions,
+) -> CheckResult:
+    targets = (pgl_home, pgl_home / "obslog")
+    for target in targets:
+        if is_drvfs(target, mounts_text=mounts_text):
+            return CheckResult("pgl-home", "RED", f"{target} is on drvfs; use WSL ext4")
+        try:
+            probe_root = _nearest_existing_directory(target)
+            problem = permission_probe(probe_root)
+        except RuntimeError as exc:
+            return CheckResult("pgl-home", "RED", str(exc))
+        if problem is not None:
+            return CheckResult(
+                "pgl-home",
+                "RED",
+                f"permission fidelity probe for {target} via {probe_root} failed: {problem}",
+            )
+    return CheckResult(
+        "pgl-home",
+        "GREEN",
+        f"POSIX 0600/0700 probes passed for {pgl_home} and {pgl_home / 'obslog'}",
+    )
+
+
+def check_logs(
+    pgl_home: Path,
+    *,
+    write_probe: Callable[[Path], str | None] = _probe_permissions,
+) -> CheckResult:
+    logs = pgl_home / "logs"
+    if not logs.is_dir():
+        return CheckResult("logs", "RED", f"missing directory: {logs}")
+    try:
+        mode = stat.S_IMODE(logs.stat().st_mode)
+    except OSError as exc:
+        return CheckResult("logs", "RED", str(exc))
+    if mode != 0o700:
+        return CheckResult("logs", "RED", f"{logs} mode is {mode:04o}, required 0700")
+    problem = write_probe(logs)
+    if problem is not None:
+        return CheckResult("logs", "RED", f"{logs} is not safely writable: {problem}")
+    return CheckResult("logs", "GREEN", f"{logs} exists, is 0700, and is writable")
+
+
+def check_host_labels(
+    collector_configs: Sequence[Path],
+    *,
+    actual_hostname: str,
+    host_platform: str,
+) -> CheckResult:
+    warnings: list[str] = []
+    try:
+        for config_path in collector_configs:
+            payload = _load_json(config_path)
+            face = payload.get("face", config_path.stem)
+            configured = payload.get("host")
+            if not isinstance(configured, str) or not configured:
+                raise ValueError(f"{config_path}: host must be a non-empty string")
+            if configured == "mbp" and host_platform == "darwin":
+                continue
+            if configured == "mbp":
+                warnings.append(f"{face}=mbp is the shipped macOS label")
+            elif configured != actual_hostname:
+                warnings.append(f"{face}={configured}, actual hostname={actual_hostname}")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return CheckResult("host-label", "RED", str(exc))
+    if warnings:
+        return CheckResult("host-label", "WARN", "; ".join(warnings))
+    return CheckResult("host-label", "GREEN", f"collector labels match {actual_hostname}")
+
+
+def check_soul_alert(
+    face: str,
+    growth_config: Path,
+    unit_environment: UnitEnvironment,
+) -> CheckResult:
+    name = f"soul-alert-{face}"
+    try:
+        configured = _load_json(growth_config).get("soul_alert_argv")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return CheckResult(name, "RED", str(exc))
+    if configured is None or configured == []:
+        return CheckResult(name, "SKIP", "soul_alert_argv is not configured")
+    if (
+        not isinstance(configured, list)
+        or not configured
+        or any(not isinstance(item, str) or not item.strip() for item in configured)
+    ):
+        return CheckResult(name, "RED", "soul_alert_argv must be a non-empty string list")
+    if unit_environment.mode == "undetermined":
+        return CheckResult(
+            name,
+            "UNDETERMINED",
+            "cannot resolve argv[0] until --python-bin is supplied or a unit is installed",
+        )
+    command = os.path.expanduser(configured[0])
+    resolved = shutil.which(command, path=unit_environment.path)
+    if resolved is None:
+        return CheckResult(
+            name,
+            "RED",
+            f"mode={unit_environment.mode}; argv[0] {configured[0]!r} is not on the unit PATH",
+        )
+    return CheckResult(
+        name,
+        "GREEN",
+        f"mode={unit_environment.mode}; argv[0] resolves to {resolved}",
+    )
+
+
+def check_transcripts_roots(
+    growth_configs: Mapping[str, Path],
+    *,
+    mounts_text: str | None = None,
+) -> CheckResult:
+    configured: list[str] = []
+    warnings: list[str] = []
+    try:
+        for face, config_path in growth_configs.items():
+            value = _load_json(config_path).get("transcripts_root")
+            if value == "":
+                continue
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{face} transcripts_root must be non-empty when configured")
+            root = Path(value).expanduser().resolve(strict=False)
+            if not root.is_dir():
+                raise ValueError(f"{face} transcripts_root is not a directory: {root}")
+            configured.append(f"{face}={root}")
+            if is_drvfs(root, mounts_text=mounts_text):
+                warnings.append(
+                    f"{face}={root} is on drvfs; your transcripts likely live on the Windows side"
+                )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return CheckResult("transcripts-root", "RED", str(exc))
+    if warnings:
+        return CheckResult("transcripts-root", "WARN", "; ".join(warnings))
+    if not configured:
+        return CheckResult("transcripts-root", "SKIP", "no face configures transcripts_root")
+    return CheckResult("transcripts-root", "GREEN", "; ".join(configured))
+
+
+def _system_timezone() -> tuple[str, int]:
+    zone_name = ""
+    timezone_file = Path("/etc/timezone")
+    try:
+        zone_name = timezone_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    if not zone_name:
+        localtime = Path("/etc/localtime")
+        try:
+            target = localtime.resolve(strict=True)
+            marker = "/zoneinfo/"
+            if marker in str(target):
+                zone_name = str(target).split(marker, 1)[1]
+        except OSError:
+            pass
+    if not zone_name:
+        zone_name = time.tzname[0] or str(datetime.now().astimezone().tzinfo)
+    offset = datetime.now().astimezone().utcoffset()
+    offset_seconds = int(offset.total_seconds()) if offset is not None else 0
+    return zone_name, offset_seconds
+
+
+def check_timezone(*, timezone_value: tuple[str, int] | None = None) -> CheckResult:
+    zone_name, offset_seconds = timezone_value or _system_timezone()
+    if zone_name in {"Asia/Tokyo", "JST"} and offset_seconds == 9 * 60 * 60:
+        return CheckResult("tz", "GREEN", f"system timezone is {zone_name} (JST)")
+    return CheckResult(
+        "tz",
+        "WARN",
+        f"system timezone is {zone_name}; timers fire in host-local time, set Asia/Tokyo for JST",
+    )
+
+
+def check_scheduler(
+    *,
+    host_platform: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    uid: int | None = None,
+) -> CheckResult:
+    if not host_platform.startswith("linux"):
+        return CheckResult("scheduler", "SKIP", "systemd user manager check is Linux-only")
+    try:
+        manager = runner(
+            ["systemctl", "--user", "show-environment"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return CheckResult(
+            "scheduler",
+            "RED",
+            f"systemctl --user is unavailable: {exc}; on WSL set systemd=true in /etc/wsl.conf",
+        )
+    if manager.returncode != 0:
+        detail = (manager.stderr or manager.stdout).strip()
+        return CheckResult(
+            "scheduler",
+            "RED",
+            f"systemctl --user is unreachable: {detail}; on WSL set systemd=true in /etc/wsl.conf",
+        )
+    try:
+        linger = runner(
+            ["loginctl", "show-user", str(os.getuid() if uid is None else uid), "-p", "Linger", "--value"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return CheckResult("scheduler", "WARN", f"user manager reachable; linger unknown: {exc}")
+    linger_value = linger.stdout.strip().lower() if linger.returncode == 0 else "unknown"
+    if linger_value == "yes":
+        return CheckResult("scheduler", "GREEN", "systemd user manager reachable; linger=yes")
+    return CheckResult(
+        "scheduler",
+        "WARN",
+        f"systemd user manager reachable; linger={linger_value or 'unknown'}",
+    )
+
+
+def check_no_spaces(paths: Mapping[str, Path | str | None]) -> CheckResult:
+    offenders = [f"{name}={value}" for name, value in paths.items() if value is not None and any(c.isspace() for c in str(value))]
+    if offenders:
+        return CheckResult(
+            "no-spaces",
+            "RED",
+            "systemd ExecStart rendering requires paths without whitespace: " + "; ".join(offenders),
+        )
+    return CheckResult("no-spaces", "GREEN", "PGL_REPO, PGL_HOME, and configured PYTHON_BIN contain no spaces")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--python-bin",
+        metavar="DIR",
+        help="prospective CPython bin directory used to render __PGL_PYTHON_BIN__",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    host_platform = sys.platform
+    environment = resolve_unit_environment(
+        python_bin=args.python_bin,
+        environ=os.environ,
+        home=Path.home(),
+        host_platform=host_platform,
+    )
+    pgl_home = Path(os.environ.get("PGL_HOME", "~/.persona-growth-loop")).expanduser()
+    print(
+        f"[INFO] environment: mode={environment.mode}; source={environment.source}; "
+        f"PATH={environment.path}"
+    )
+    ucd = check_ucd(environment)
+    print(ucd.render())
+    print(ambient_ucd_line(os.environ))
+
+    checks = [
+        check_paths(
+            pgl_home,
+            REPO_ROOT / "config" / "obs-collector.json",
+            REPO_ROOT / "config" / "obs-collector-luca.json",
+        ),
+        check_pgl_home(pgl_home),
+        check_logs(pgl_home),
+        check_host_labels(
+            (
+                REPO_ROOT / "config" / "obs-collector.json",
+                REPO_ROOT / "config" / "obs-collector-luca.json",
+            ),
+            actual_hostname=socket.gethostname(),
+            host_platform=host_platform,
+        ),
+        check_soul_alert(
+            "alpha",
+            REPO_ROOT / "config" / "growth-alpha.json",
+            environment,
+        ),
+        check_soul_alert(
+            "luca",
+            REPO_ROOT / "config" / "growth-luca.json",
+            environment,
+        ),
+        check_transcripts_roots(
+            {
+                "alpha": REPO_ROOT / "config" / "growth-alpha.json",
+                "luca": REPO_ROOT / "config" / "growth-luca.json",
+            }
+        ),
+        check_timezone(),
+        check_scheduler(host_platform=host_platform),
+        check_no_spaces(
+            {
+                "PGL_REPO": REPO_ROOT,
+                "PGL_HOME": pgl_home,
+                "PYTHON_BIN": environment.python_bin,
+            }
+        ),
+    ]
+    for result in checks:
+        print(result.render())
+    return 1 if ucd.failed or any(result.failed for result in checks) else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

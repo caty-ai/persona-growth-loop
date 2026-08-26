@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the Persona Growth Loop Luca observation collector daily
+
+[Timer]
+OnCalendar=*-*-* 00:05:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

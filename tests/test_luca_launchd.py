@@ -100,24 +100,39 @@ class LucaLaunchdTemplateTests(unittest.TestCase):
         self.assertNotIn("__PGL_REPO__", rendered)
         self.assertNotIn("__PGL_HOME__", rendered)
         destination.write_text(rendered, encoding="utf-8")
+        with destination.open("rb") as handle:
+            return plistlib.load(handle)
 
+    def test_launchd_templates_lint_when_plutil_is_available(self) -> None:
         plutil = Path("/usr/bin/plutil")
         if not plutil.exists():
             discovered = shutil.which("plutil")
             if discovered is None:
                 self.skipTest("plutil is not available")
             plutil = Path(discovered)
-        result = subprocess.run(
-            [str(plutil), "-lint", str(destination)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        with destination.open("rb") as handle:
-            return plistlib.load(handle)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for template in sorted(TEMPLATES.glob("*.plist")):
+                destination = root / template.name
+                rendered = (
+                    template.read_text(encoding="utf-8")
+                    .replace("__PGL_REPO__", str(root / "persona-growth-loop"))
+                    .replace("__PGL_HOME__", str(root / "pgl-home"))
+                )
+                destination.write_text(rendered, encoding="utf-8")
+                result = subprocess.run(
+                    [str(plutil), "-lint", str(destination)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(
+                    result.returncode,
+                    0,
+                    f"{template.name}: {result.stdout}{result.stderr}",
+                )
 
-    def test_luca_collector_template_renders_and_lints(self) -> None:
+    def test_luca_collector_template_renders(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             rendered = self._render(
@@ -156,7 +171,7 @@ class LucaLaunchdTemplateTests(unittest.TestCase):
                 str(home / "logs" / "collector-luca.err.log"),
             )
 
-    def test_luca_weekly_template_renders_and_lints(self) -> None:
+    def test_luca_weekly_template_renders(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             rendered = self._render(
@@ -217,6 +232,22 @@ class LucaLaunchdTemplateTests(unittest.TestCase):
                 "__PGL_REPO__/config/obs-collector.json",
             ],
         )
+        self.assertEqual(
+            collector["EnvironmentVariables"],
+            {
+                "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+                "PGL_HOME": "__PGL_HOME__",
+            },
+        )
+        self.assertEqual(collector["WorkingDirectory"], "__PGL_REPO__")
+        self.assertEqual(
+            collector["StandardOutPath"],
+            "__PGL_HOME__/logs/collector.out.log",
+        )
+        self.assertEqual(
+            collector["StandardErrorPath"],
+            "__PGL_HOME__/logs/collector.err.log",
+        )
         self.assertEqual(weekly["Label"], "ai.caty.pgl.mirror-weekly")
         self.assertEqual(
             weekly["StartCalendarInterval"],
@@ -230,6 +261,22 @@ class LucaLaunchdTemplateTests(unittest.TestCase):
                 "__PGL_REPO__/bin/pgl-mirror-weekly",
                 "alpha",
             ],
+        )
+        self.assertEqual(
+            weekly["EnvironmentVariables"],
+            {
+                "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+                "PGL_HOME": "__PGL_HOME__",
+            },
+        )
+        self.assertEqual(weekly["WorkingDirectory"], "__PGL_REPO__")
+        self.assertEqual(
+            weekly["StandardOutPath"],
+            "__PGL_HOME__/logs/mirror-weekly.out.log",
+        )
+        self.assertEqual(
+            weekly["StandardErrorPath"],
+            "__PGL_HOME__/logs/mirror-weekly.err.log",
         )
 
 

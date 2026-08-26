@@ -96,7 +96,7 @@ flowchart LR
 | `mirror/` | write path の外から baseline・週次・月次の drift check で結果を観測 |
 | `probes/` | drift mirror が使う version 固定の eval corpus と manifest |
 | `reviewd/` | fail-closed で exact-`APPROVE` を要求する diff-review seam |
-| `templates/` | observation collector と weekly mirror の launchd job template |
+| `templates/` | observation collector と weekly mirror の launchd/macOS・systemd/Linux job template。[Linux 配線](docs/ops/linux-wiring.md)を参照 |
 | `tests/` | unit / integration test suite、fixture、adapter stub |
 | `vps/` | Luca 用 forced-command production dispatch entry point |
 | `writerd/` | 採用可能な evidence から proposal を生成する fail-closed JSON writer seam |
@@ -127,7 +127,7 @@ flowchart LR
 |---|---|
 | Python 3.14.x・UCD 16.0.0 固定（依存は PyYAML 1つ） | ✅ CI・開発とも 3.14 |
 | macOS | ✅ 毎日の本番運用 |
-| Linux (Ubuntu) | ✅ CI でフルテストスイート実行（macOS 専用の統合テスト数件は設計上 skip・スケジューラ雛形は launchd=macOS 向け） |
+| Linux (Ubuntu) | ✅ CI でフルテストスイート実行・systemd user-unit template 提供。[Linux 配線](docs/ops/linux-wiring.md)を参照 |
 | 観測対象エージェント = Claude Code（ローカル面） | ✅ 本番稼働中 |
 | SSH 越しのリモート persona エンジン（エンジン面） | ✅ 観測は本番稼働中・注入は承認ゲート待ち |
 

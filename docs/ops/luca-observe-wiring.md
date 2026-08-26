@@ -6,3 +6,5 @@ lives in the private ops repository.
 
 The collector implementation and its configuration schema ship in this repository —
 see `collectors/hermes_luca/` and [ops/collector-wiring.md](collector-wiring.md).
+
+For WSL2/Linux systemd setup, see [WSL2 / Linux wiring](linux-wiring.md).

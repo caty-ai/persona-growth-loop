@@ -7,6 +7,9 @@ hour to the local equivalent. The collector assigns records to their fixed JST
 timestamp date, and the default CLI run processes the completed previous JST day;
 `--date` overrides that bucket explicitly.
 
+For WSL2/Linux systemd setup and GNU command variants, see
+[WSL2 / Linux wiring](linux-wiring.md).
+
 Running just after midnight lets the collector process the prior day's activity
 in full, and keeps it on the same calendar day as the Monday 01:30 weekly mirror
 -- which is what makes the mirror's collector-liveness check
@@ -24,11 +27,11 @@ Set the checkout and Tier L home, create private log storage, render the two
 placeholders, then bootstrap the per-user agent:
 
 ```sh
-python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+python3 -c "import sys,unicodedata; assert sys.version_info[:2] == (3, 14), sys.version; assert unicodedata.unidata_version == '16.0.0', unicodedata.unidata_version"
 PGL_REPO=/absolute/path/to/persona-growth-loop PGL_HOME="$HOME/.persona-growth-loop"; install -d -m 700 "$PGL_HOME/logs" "$HOME/Library/LaunchAgents"; sed -e "s|__PGL_REPO__|$PGL_REPO|g" -e "s|__PGL_HOME__|$PGL_HOME|g" "$PGL_REPO/templates/launchd/ai.caty.pgl.obs-collector.plist" > "$HOME/Library/LaunchAgents/ai.caty.pgl.obs-collector.plist"; launchctl bootstrap gui/501 "$HOME/Library/LaunchAgents/ai.caty.pgl.obs-collector.plist"
 ```
 
-The first command must succeed: the collector requires Python 3.11 or newer.
+The first command must succeed: the collector requires CPython 3.14.x (UCD 16.0.0).
 The template uses `/usr/bin/env python3` with a fixed PATH covering Apple and
 common Homebrew locations.
 
