@@ -1900,6 +1900,7 @@ if exit_path.is_file():
             )
         if output is None:
             self.assertEqual(len(records), 4)
+            self.assertEqual(records[-1]["utterance"], "/persona public")
         self.assertTrue(all(item["held_at_writes"] == [True] for item in records))
 
     def test_accept_settles_across_torn_intermediate_switch_reread(self):
@@ -2244,6 +2245,7 @@ if exit_path.is_file():
             )
         if output is None:
             self.assertEqual(len(records), 4)
+            self.assertEqual(records[-1]["utterance"], "/persona public")
         self.assertEqual(records[0]["held_at_writes"], [False])
         with self.assertRaises(AssertionError):
             self._assert_accept_streams_held(records)
@@ -2331,6 +2333,7 @@ if exit_path.is_file():
             )
         if output is None:
             self.assertEqual(len(records), 4)
+            self.assertEqual(records[-1]["utterance"], "/persona public")
         self.assertEqual(records[1]["held_at_writes"], [True, True])
 
     def test_accept_restore_rejects_stale_warmup_owner_on_both_attempts(self):
