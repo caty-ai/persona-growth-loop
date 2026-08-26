@@ -1661,12 +1661,13 @@ if exit_path.is_file():
 
     def _run_accept_server(self):
         records = []
-        session_ids = (
+        provisioned_session_ids = (
             "11111111-1111-4111-8111-111111111111",
             "22222222-2222-4222-8222-222222222222",
             "33333333-3333-4333-8333-333333333333",
             "44444444-4444-4444-8444-444444444444",
         )
+        expected_session_ids = provisioned_session_ids[:3]
         record_lock = threading.Lock()
         install = self.install
         manifest = json.loads((self.build / "manifest.json").read_text(encoding="utf-8"))
@@ -1678,12 +1679,12 @@ if exit_path.is_file():
                 length = int(handler.headers["Content-Length"])
                 body = json.loads(handler.rfile.read(length))
                 with record_lock:
-                    if len(records) >= len(session_ids):
+                    if len(records) >= len(provisioned_session_ids):
                         handler.send_error(
                             500, "unexpected extra request beyond fixture session_ids"
                         )
                         return
-                    session_id = session_ids[len(records)]
+                    session_id = provisioned_session_ids[len(records)]
                     record = {
                         "path": handler.path,
                         "authorization": handler.headers.get("Authorization"),
@@ -1765,7 +1766,7 @@ if exit_path.is_file():
             encoding="utf-8",
         )
         config.chmod(0o600)
-        return server, thread, records, session_ids
+        return server, thread, records, expected_session_ids
 
     def _stop_accept_server(self, server, thread, records):
         server.shutdown()
@@ -1796,7 +1797,7 @@ if exit_path.is_file():
 
     def test_accept_real_streams_persist_owned_status_before_client_disconnect(self):
         module = load_dispatch_module("luca_dispatch_accept_real_streams")
-        server, thread, records, session_ids = self._run_accept_server()
+        server, thread, records, expected_session_ids = self._run_accept_server()
         client_body_reads = []
 
         def reject_body_read(response, *_arguments, **_kwargs):
@@ -1815,7 +1816,7 @@ if exit_path.is_file():
             self._stop_accept_server(server, thread, records)
 
         if output is not None:
-            self.assertEqual(json.loads(output), sorted(session_ids[:3]))
+            self.assertEqual(json.loads(output), sorted(expected_session_ids))
             self.assertEqual(
                 [record["body"]["input"] for record in records],
                 ["deployment warm-up", "/persona mode-b", "/persona public"],
