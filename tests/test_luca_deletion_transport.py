@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -30,6 +31,7 @@ from growthlane.soul import write_manifest
 REPO = Path(__file__).resolve().parents[1]
 DISPATCH = REPO / "vps/pgl-luca-dispatch"
 DAY = "2026-08-10"
+JST = timezone(timedelta(hours=9))
 SESSION_ID = "11111111-1111-4111-8111-111111111111"
 REAL_ATTENDED_TRANSPORT = deploy.AttendedSafetyTransport
 
@@ -188,7 +190,10 @@ class LucaOperationFixture:
             encoding="utf-8",
         )
         (self.pgl_home / "reports/weekly/latest-luca.json").write_text(
-            json.dumps({"generated_at": DAY}), encoding="utf-8"
+            # gates.check_mirror compares against wall-clock now(JST) with a
+            # 14-day window, so a fresh marker must be dated at run time.
+            json.dumps({"generated_at": datetime.now(JST).date().isoformat()}),
+            encoding="utf-8",
         )
         write_manifest(
             self.profile,
