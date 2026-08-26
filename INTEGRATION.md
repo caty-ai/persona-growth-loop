@@ -32,7 +32,8 @@ so both ledgers point at the same source of truth:
   reference only). **CP-2 approved by the owner 2026-08-02** — the record of record for
   in-force status is that file's version-history table.
   Overlay writes (manual or automated; empty-file bootstrap excepted) stay forbidden until the
-  per-face CP-3 GO.
+  per-face CP-3 GO. The alpha local face received its CP-3a GO on 2026-08-05 (owner
+  decision), so alpha-face overlay writes are live; every other face stays gated.
 - sgl is **not** on this path (overlay lane bypasses sgl by design; soul-tier changes remain
   council + owner approval as before). **The exemption is the overlay lane only (governance-R12b,
   rendered phrase data); the sgl approval flow is unchanged.**
@@ -54,10 +55,16 @@ so both ledgers point at the same source of truth:
 
 - Observation collector: the pgl#5 launchd template
   `templates/launchd/ai.caty.pgl.obs-collector.plist` runs nightly at 00:05 local
-  time. It is shipped but not installed; the operator renders its checkout/home
-  placeholders and loads it manually per `docs/ops/collector-wiring.md`.
-- The combined nightly growth pipeline still lands with pgl#6 and remains
-  **disabled until CP-2 + CP-3 per-face GO**. Its synchronous entrypoint is:
+  time. It is installed and running on the operator machine (alpha local face);
+  the operator rendered its checkout/home placeholders and loaded it per
+  `docs/ops/collector-wiring.md`.
+- The combined nightly growth pipeline (landed with pgl#6) was gated
+  **disabled until CP-2 + CP-3 per-face GO** — that gate is historical: CP-2 was
+  recorded 2026-08-02 and the per-face CP-3a GO (2026-08-05, owner decision)
+  opened the alpha local-face lane, which has been live in production since then
+  (launchd: obs-collector 00:05, nightly 00:15, mirror-weekly Mon 01:30).
+  Engine-face observation is live; engine-face injection stays behind its own
+  per-face approval gate (CP-3b). Its synchronous entrypoint is:
 
   ```sh
   PGL_HOME="$HOME/.persona-growth-loop" bin/pgl-nightly --date YYYY-MM-DD
