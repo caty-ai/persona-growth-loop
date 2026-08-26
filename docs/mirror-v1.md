@@ -156,7 +156,7 @@ template at `templates/launchd/ai.caty.pgl.mirror-weekly.plist`. (The other
 shipped launchd template is the observation collector.) It ships no nightly,
 monthly, or baseline unit. A rendered template or host-authored nightly plist is
 host-installed state, not a repository-shipped schedule. The weekly template
-installs nothing by itself; when rendered, its schedule is Monday 00:30 in the
+installs nothing by itself; when rendered, its schedule is Monday 01:30 in the
 host timezone and its `WorkingDirectory` is the checkout. Run weekly no less often
 than every seven JST dates; the digest, not the report body, carries the explicit
 SLA-gap line. Run monthly after the explicit operator-run baseline; monthly also
