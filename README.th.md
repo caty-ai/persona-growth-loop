@@ -21,6 +21,9 @@ Persona Growth Loop (PGL) ช่วยให้ AI เอเจนต์ที�
 🔧 [สถาปัตยกรรม (แช่แข็งแล้ว)](docs/architecture-v1.md) ｜ 📘 [ข้อตกลง (Contracts)](docs/contracts/overlay-contract.md)
 
 </div>
+<!-- repo-state:begin (generated; do not edit) -->
+<p align="center"><sub>generation: <code>6935c82</code> (2026-08-26T19:56:28Z) · verify: <a href="https://api.github.com/repos/caty-ai/persona-growth-loop/commits/feat/repo-state-caller-37">API HEAD</a> · <a href="./status.json">status.json</a></sub></p>
+<!-- repo-state:end -->
 
 ---
 
