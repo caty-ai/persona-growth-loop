@@ -573,6 +573,50 @@ class MirrorIOTests(unittest.TestCase):
                 alerts[0],
             )
 
+    def test_mirror_lock_post_mkdir_identity_mismatch_preserves_peer_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary).resolve()
+            lock = home / "mirror" / "lock.d"
+            real_open = os.open
+            real_close = os.close
+            real_fstat = os.fstat
+            opened: list[int] = []
+            closed: list[int] = []
+
+            def replace_then_open(
+                path: os.PathLike[str] | str, flags: int, mode: int = 0o777
+            ) -> int:
+                if Path(path) == lock:
+                    lock.rmdir()
+                    lock.mkdir()
+                    fd = real_open(path, flags, mode)
+                    opened.append(fd)
+                    return fd
+                return real_open(path, flags, mode)
+
+            def mismatched_fstat(fd: int) -> os.stat_result | SimpleNamespace:
+                result = real_fstat(fd)
+                if fd in opened:
+                    return SimpleNamespace(st_dev=result.st_dev, st_ino=result.st_ino + 1)
+                return result
+
+            def tracking_close(fd: int) -> None:
+                if fd in opened:
+                    closed.append(fd)
+                real_close(fd)
+
+            with mock.patch("mirror.common.os.open", side_effect=replace_then_open):
+                with mock.patch("mirror.common.os.fstat", side_effect=mismatched_fstat):
+                    with mock.patch("mirror.common.os.close", side_effect=tracking_close):
+                        with mirror_lock(home) as acquired:
+                            self.assertFalse(acquired)
+
+            self.assertTrue(lock.is_dir())
+            self.assertEqual(len(opened), 1)
+            self.assertCountEqual(closed, opened)
+            with self.assertRaises(OSError):
+                os.fstat(opened[0])
+
     def test_mirror_lock_leaves_unsafe_reclaim_tombstones_with_alerts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary).resolve()

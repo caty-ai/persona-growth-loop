@@ -302,8 +302,9 @@ def _reclaim_mirror_lock(
             return False, _manual_review_reclaim_message(
                 tombstone, f"post-rename-lstat-failed:{reason}"
             )
-        # The observed directory fd pins this inode through the rename, closing
-        # the inode-reuse window; a different object at either path fails closed.
+        # The observed directory fd pins this inode for the whole observation.
+        # The remaining lstat-to-open gap pins the new object instead, so every
+        # subsequent decision is consistent with that object.
         if (moved.st_dev, moved.st_ino) != observed_identity:
             if _restore_reclaim_tombstone(lock, tombstone):
                 return False, None
@@ -416,7 +417,7 @@ def mirror_lock(
                 lock_metadata = os.lstat(lock)
                 if stat.S_ISLNK(lock_metadata.st_mode) or not stat.S_ISDIR(lock_metadata.st_mode):
                     raise MirrorError("mirror lock has unsafe shape")
-                lock_fd = os.open(lock, os.O_RDONLY | os.O_DIRECTORY)
+                lock_fd = os.open(lock, _directory_open_flags())
                 pinned_metadata = os.fstat(lock_fd)
                 if (lock_metadata.st_dev, lock_metadata.st_ino) != (
                     pinned_metadata.st_dev,
@@ -452,13 +453,23 @@ def mirror_lock(
     lock_fd = None
     try:
         lock_metadata = os.lstat(lock)
-        lock_fd = os.open(lock, os.O_RDONLY | os.O_DIRECTORY)
+        lock_fd = os.open(lock, _directory_open_flags())
         pinned_metadata = os.fstat(lock_fd)
         if (lock_metadata.st_dev, lock_metadata.st_ino) != (
             pinned_metadata.st_dev,
             pinned_metadata.st_ino,
         ):
-            raise OSError("mirror lock identity changed after mkdir")
+            raise MirrorError("mirror lock identity changed after mkdir")
+    except MirrorError as exc:
+        if lock_fd is not None:
+            os.close(lock_fd)
+        if alert is not None:
+            alert(
+                "mirror lock acquisition failed after mkdir; "
+                f"post-mkdir identity mismatch: {exc}"
+            )
+        yield False
+        return
     except OSError as exc:
         if lock_fd is not None:
             os.close(lock_fd)
