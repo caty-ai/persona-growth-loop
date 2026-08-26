@@ -1182,6 +1182,10 @@ if exit_path.is_file():
                 )
         self.assertEqual(str(ctx.exception), "transfer exceeds capacity")
         module._validate_pack_tree(self.pack)
+        self.assertTrue(
+            (self.pack / "catalogs/oversized.bin").is_file(),
+            "fake rsync never wrote oversized.bin",
+        )
         self.assertEqual((self.pack / "catalogs/oversized.bin").stat().st_size, 32)
 
     def test_receive_pack_enforces_rsync_receiver_version_floor_and_backport_exception(self):
