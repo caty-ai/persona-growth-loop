@@ -276,14 +276,16 @@ def _manual_review_reclaim_message(tombstone: Path, reason: str) -> str:
 
 
 def _reclaim_mirror_lock(
-    lock: Path, expected_identity: Optional[Tuple[int, int]] = None
+    lock: Path, observed_fd: int
 ) -> Tuple[bool, Optional[str]]:
     try:
+        observed = os.fstat(observed_fd)
+        observed_identity = (observed.st_dev, observed.st_ino)
         metadata = os.lstat(lock)
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
             return False, None
         identity = (metadata.st_dev, metadata.st_ino)
-        if expected_identity is not None and identity != expected_identity:
+        if identity != observed_identity:
             return False, None
         if _reclaimable_lock_children(lock) is None:
             return False, None
@@ -300,9 +302,9 @@ def _reclaim_mirror_lock(
             return False, _manual_review_reclaim_message(
                 tombstone, f"post-rename-lstat-failed:{reason}"
             )
-        # The pre-rename lstat window is narrowed to this syscall-scale gap and
-        # self-heals by restoring the tombstone on mismatch, but it is not eliminated.
-        if (moved.st_dev, moved.st_ino) != identity:
+        # The observed directory fd pins this inode through the rename, closing
+        # the inode-reuse window; a different object at either path fails closed.
+        if (moved.st_dev, moved.st_ino) != observed_identity:
             if _restore_reclaim_tombstone(lock, tombstone):
                 return False, None
             return False, _manual_review_reclaim_message(
@@ -404,33 +406,42 @@ def mirror_lock(
             lock.mkdir(mode=0o700)
             break
         except FileExistsError:
+            lock_fd: Optional[int] = None
+            reclaimed = False
+            note = None
+            age_hours = 0.0
+            pid = "unknown"
+            host = "unknown"
             try:
                 lock_metadata = os.lstat(lock)
                 if stat.S_ISLNK(lock_metadata.st_mode) or not stat.S_ISDIR(lock_metadata.st_mode):
                     raise MirrorError("mirror lock has unsafe shape")
-                lock_identity = (lock_metadata.st_dev, lock_metadata.st_ino)
+                lock_fd = os.open(lock, os.O_RDONLY | os.O_DIRECTORY)
+                pinned_metadata = os.fstat(lock_fd)
+                if (lock_metadata.st_dev, lock_metadata.st_ino) != (
+                    pinned_metadata.st_dev,
+                    pinned_metadata.st_ino,
+                ):
+                    raise MirrorError("mirror lock identity changed during observation")
                 started, pid, host = _mirror_lock_owner(lock)
                 age_hours = (datetime.now(timezone.utc) - started).total_seconds() / 3600
+                if not recovered and age_hours > MIRROR_LOCK_STALE_HOURS:
+                    reclaimed, note = _reclaim_mirror_lock(lock, lock_fd)
             except (OSError, MirrorError):
-                age_hours = 0.0
-                pid = "unknown"
-                host = "unknown"
-                lock_identity = None
-            if (
-                not recovered
-                and age_hours > MIRROR_LOCK_STALE_HOURS
-            ):
-                reclaimed, note = _reclaim_mirror_lock(lock, lock_identity)
-                if reclaimed:
-                    recovered = True
-                    if alert is not None:
-                        alert(
-                            "stale mirror lock recovered "
-                            f"age={age_hours:.1f}h pid={pid} host={host}"
-                        )
-                    continue
-                if note is not None and alert is not None:
-                    alert(note)
+                pass
+            finally:
+                if lock_fd is not None:
+                    os.close(lock_fd)
+            if reclaimed:
+                recovered = True
+                if alert is not None:
+                    alert(
+                        "stale mirror lock recovered "
+                        f"age={age_hours:.1f}h pid={pid} host={host}"
+                    )
+                continue
+            if note is not None and alert is not None:
+                alert(note)
             if alert is not None:
                 alert(
                     "mirror lock contention "
@@ -438,10 +449,19 @@ def mirror_lock(
                 )
             yield False
             return
+    lock_fd = None
     try:
         lock_metadata = os.lstat(lock)
-        lock_identity = (lock_metadata.st_dev, lock_metadata.st_ino)
+        lock_fd = os.open(lock, os.O_RDONLY | os.O_DIRECTORY)
+        pinned_metadata = os.fstat(lock_fd)
+        if (lock_metadata.st_dev, lock_metadata.st_ino) != (
+            pinned_metadata.st_dev,
+            pinned_metadata.st_ino,
+        ):
+            raise OSError("mirror lock identity changed after mkdir")
     except OSError as exc:
+        if lock_fd is not None:
+            os.close(lock_fd)
         try:
             lock.rmdir()
         except OSError:
@@ -464,10 +484,12 @@ def mirror_lock(
             },
         )
     except BaseException:
-        _, note = _reclaim_mirror_lock(lock, lock_identity)
+        _, note = _reclaim_mirror_lock(lock, lock_fd)
         if note is not None and alert is not None:
             alert(note)
         raise
+    finally:
+        os.close(lock_fd)
     try:
         yield True
     finally:
