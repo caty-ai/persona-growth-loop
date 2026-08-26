@@ -96,7 +96,7 @@ flowchart LR
 | `mirror/` | 在 write path 之外通过 baseline、每周和每月 drift check 观测结果 |
 | `probes/` | drift mirror 使用的版本固定 eval corpus 和 manifest |
 | `reviewd/` | fail-closed、要求 exact-`APPROVE` 的 diff-review seam |
-| `templates/` | observation collector 和 weekly mirror 的 launchd job template |
+| `templates/` | observation collector 和 weekly mirror 的 launchd/macOS 与 systemd/Linux job template；参见 [Linux 配置](docs/ops/linux-wiring.md) |
 | `tests/` | unit / integration test suite、fixture 和 adapter stub |
 | `vps/` | Luca 的 forced-command production dispatch entry point |
 | `writerd/` | 根据符合条件的 evidence 生成 proposal 的 fail-closed JSON writer seam |
@@ -127,7 +127,7 @@ flowchart LR
 |---|---|
 | Python 3.14.x，固定 UCD 16.0.0（唯一依赖：PyYAML） | ✅ CI 与日常开发均为 3.14 |
 | macOS | ✅ 日常生产环境使用中 |
-| Linux (Ubuntu) | ✅ CI 中运行完整测试套件（少数 macOS 专用集成测试按设计跳过；调度模板仅提供 launchd/macOS） |
+| Linux (Ubuntu) | ✅ CI 中运行完整测试套件并提供 systemd user-unit template；参见 [Linux 配置](docs/ops/linux-wiring.md) |
 | 以 Claude Code 作为被观测的智能体（本地 face） | ✅ 已在生产环境中运行 |
 | 通过 SSH 连接的远程 persona 引擎（引擎 face） | ✅ 观测已在生产环境中运行；注入功能仍在审批闸门之后 |
 

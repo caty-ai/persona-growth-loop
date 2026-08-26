@@ -23,18 +23,21 @@ The host inventory verified on 2026-08-05 was:
 A manual nightly invocation is also operator-run even though that host has a
 nightly schedule.
 
+For WSL2/Linux systemd setup and GNU command variants, see
+[WSL2 / Linux wiring](linux-wiring.md).
+
 ## Install
 
 Set the checkout and private Tier L home, create the log directory, render the two
 placeholders, lint the plist, then bootstrap the per-user agent:
 
 ```sh
-python3 -c "import sys,unicodedata; assert sys.version_info >= (3, 11), sys.version; assert unicodedata.unidata_version == '16.0.0', unicodedata.unidata_version"
+python3 -c "import sys,unicodedata; assert sys.version_info[:2] == (3, 14), sys.version; assert unicodedata.unidata_version == '16.0.0', unicodedata.unidata_version"
 PGL_REPO=/absolute/path/to/persona-growth-loop PGL_HOME="$HOME/.persona-growth-loop"; install -d -m 700 "$PGL_HOME/logs" "$HOME/Library/LaunchAgents"; sed -e "s|__PGL_REPO__|$PGL_REPO|g" -e "s|__PGL_HOME__|$PGL_HOME|g" "$PGL_REPO/templates/launchd/ai.caty.pgl.mirror-weekly.plist" > "$HOME/Library/LaunchAgents/ai.caty.pgl.mirror-weekly.plist"; plutil -lint "$HOME/Library/LaunchAgents/ai.caty.pgl.mirror-weekly.plist"; launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/ai.caty.pgl.mirror-weekly.plist"
 ```
 
-The first command must succeed: the weekly mirror requires Python 3.11 or newer,
-and mirror behavior plus the fixed probe corpus are pinned to Unicode 16.0.0.
+The first command must succeed: the weekly mirror requires CPython 3.14.x (UCD
+16.0.0), which also pins mirror behavior and the fixed probe corpus.
 
 Adapter argv paths resolve relative to the checkout. Shipped `alpha` is wired to
 `python3 adapters/probe_responder.py`, `python3 adapters/probe_scorer.py`, and

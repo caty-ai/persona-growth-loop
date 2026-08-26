@@ -1,0 +1,11 @@
+[Unit]
+Description=Persona Growth Loop Luca observation collector
+
+[Service]
+Type=oneshot
+WorkingDirectory=__PGL_REPO__
+Environment=PGL_HOME=__PGL_HOME__
+Environment=PATH=__PGL_PYTHON_BIN__:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env python3 __PGL_REPO__/bin/pgl-obs-collector-luca
+StandardOutput=append:__PGL_HOME__/logs/collector-luca.out.log
+StandardError=append:__PGL_HOME__/logs/collector-luca.err.log

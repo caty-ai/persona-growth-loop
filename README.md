@@ -96,7 +96,7 @@ flowchart LR
 | `mirror/` | Observes the result outside the write path through baseline, weekly, and monthly drift checks |
 | `probes/` | Versioned fixed eval corpus and manifest used by the drift mirror |
 | `reviewd/` | Fail-closed, exact-`APPROVE` diff-review seam |
-| `templates/` | launchd job templates for observation collectors and weekly mirrors |
+| `templates/` | launchd/macOS and systemd/Linux job templates for observation collectors and weekly mirrors; see [Linux wiring](docs/ops/linux-wiring.md) |
 | `tests/` | Unit and integration test suite, fixtures, and adapter stubs |
 | `vps/` | Forced-command production dispatch entry point for Luca |
 | `writerd/` | Fail-closed JSON writer seam that generates proposals from eligible evidence |
@@ -127,7 +127,7 @@ This safety net is not a promise — it is code you can run. Which brings us to 
 |---|---|
 | Python 3.14.x, pinned to UCD 16.0.0 (single dependency: PyYAML) | ✅ CI and daily development on 3.14 |
 | macOS | ✅ daily production use |
-| Linux (Ubuntu) | ✅ full test suite in CI (a few macOS-only integration tests are skipped by design; scheduling templates are launchd/macOS) |
+| Linux (Ubuntu) | ✅ full test suite in CI and systemd user-unit templates; see [Linux wiring](docs/ops/linux-wiring.md) |
 | Claude Code as the observed agent (local face) | ✅ in production |
 | A remote persona engine over SSH (engine face) | ✅ observation in production; injection behind its approval gate |
 

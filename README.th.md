@@ -96,7 +96,7 @@ flowchart LR
 | `mirror/` | สังเกตผลลัพธ์จากนอก write path ด้วย baseline และ drift check รายสัปดาห์ / รายเดือน |
 | `probes/` | eval corpus และ manifest แบบตรึงเวอร์ชันที่ drift mirror ใช้ |
 | `reviewd/` | diff-review seam แบบ fail-closed ที่กำหนดให้ต้องเป็น exact-`APPROVE` |
-| `templates/` | launchd job template สำหรับ observation collector และ weekly mirror |
+| `templates/` | launchd/macOS และ systemd/Linux job template สำหรับ observation collector และ weekly mirror; ดู [การเชื่อมต่อ Linux](docs/ops/linux-wiring.md) |
 | `tests/` | unit / integration test suite, fixture และ adapter stub |
 | `vps/` | forced-command production dispatch entry point สำหรับ Luca |
 | `writerd/` | JSON writer seam แบบ fail-closed ที่สร้าง proposal จาก evidence ที่ผ่านเกณฑ์ |
@@ -127,7 +127,7 @@ flowchart LR
 |---|---|
 | Python 3.14.x ตรึงกับ UCD 16.0.0 (มีดีเพนเดนซีเดียวคือ PyYAML) | ✅ CI และการพัฒนาใช้ 3.14 |
 | macOS | ✅ ใช้งานจริงในโปรดักชันทุกวัน |
-| Linux (Ubuntu) | ✅ รันชุดทดสอบเต็มใน CI (มีการข้ามเทสต์เฉพาะ macOS บางรายการโดยตั้งใจ; เทมเพลตตั้งเวลามีเฉพาะ launchd/macOS) |
+| Linux (Ubuntu) | ✅ รันชุดทดสอบเต็มใน CI และมี systemd user-unit template; ดู [การเชื่อมต่อ Linux](docs/ops/linux-wiring.md) |
 | ใช้ Claude Code เป็นเอเจนต์ที่ถูกสังเกตการณ์ (local face) | ✅ ใช้งานในโปรดักชันแล้ว |
 | เอนจินบุคลิกภาพระยะไกลผ่าน SSH (engine face) | ✅ การสังเกตการณ์ทำงานในโปรดักชันแล้ว ส่วนการฉีดเข้าระบบยังอยู่หลังเกตอนุมัติ |
 

@@ -53,7 +53,7 @@ so both ledgers point at the same source of truth:
 ## Cron entries
 
 - Observation collector: the pgl#5 launchd template
-  `templates/launchd/ai.caty.pgl.obs-collector.plist` runs nightly at 23:45 local
+  `templates/launchd/ai.caty.pgl.obs-collector.plist` runs nightly at 00:05 local
   time. It is shipped but not installed; the operator renders its checkout/home
   placeholders and loads it manually per `docs/ops/collector-wiring.md`.
 - The combined nightly growth pipeline still lands with pgl#6 and remains

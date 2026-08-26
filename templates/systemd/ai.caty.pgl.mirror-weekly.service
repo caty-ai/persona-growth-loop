@@ -1,0 +1,13 @@
+[Unit]
+Description=Persona Growth Loop alpha weekly mirror
+After=ai.caty.pgl.obs-collector.service
+Wants=ai.caty.pgl.obs-collector.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=__PGL_REPO__
+Environment=PGL_HOME=__PGL_HOME__
+Environment=PATH=__PGL_PYTHON_BIN__:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env python3 __PGL_REPO__/bin/pgl-mirror-weekly alpha
+StandardOutput=append:__PGL_HOME__/logs/mirror-weekly.out.log
+StandardError=append:__PGL_HOME__/logs/mirror-weekly.err.log
