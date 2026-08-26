@@ -379,67 +379,95 @@ class PathAndFilesystemCheckTests(unittest.TestCase):
 
 
 class ConfigurationCheckTests(unittest.TestCase):
-    def test_host_labels_use_shipped_defaults_and_treat_remote_face_as_info(self) -> None:
+    def test_host_labels_alpha_default_is_info_on_macos_and_warn_on_linux(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             alpha = root / "alpha.json"
-            luca = root / "luca.json"
-            shipped_alpha = root / "shipped-alpha.json"
-            shipped_luca = root / "shipped-luca.json"
-            _write_json(alpha, {"face": "alpha", "host": "workstation-default"})
-            _write_json(
-                luca,
-                {"face": "luca", "host": "remote-default", "source": {"ssh_host": "vps"}},
-            )
-            _write_json(
-                shipped_alpha,
-                {"face": "alpha", "host": "workstation-default"},
-            )
-            _write_json(
-                shipped_luca,
-                {"face": "luca", "host": "remote-default", "source": {"ssh_host": "vps"}},
-            )
-            shipped = {"alpha": shipped_alpha, "luca": shipped_luca}
+            _write_json(alpha, {"face": "alpha", "host": "mbp"})
             mac_alpha = preflight.check_host_labels(
                 (alpha,),
                 actual_hostname="machine",
                 host_platform="darwin",
-                shipped_configs=shipped,
             )
             linux_alpha = preflight.check_host_labels(
                 (alpha,),
                 actual_hostname="linux-box",
                 host_platform="linux",
-                shipped_configs=shipped,
             )
+        self.assertEqual(mac_alpha.status, "INFO")
+        self.assertIn("shipped default accepted", mac_alpha.detail)
+        self.assertEqual(linux_alpha.status, "WARN")
+        self.assertIn("choose a deployment label", linux_alpha.detail)
+
+    def test_host_labels_alpha_operator_configured_is_info_on_both_platforms(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            alpha = root / "alpha.json"
+            _write_json(alpha, {"face": "alpha", "host": "chosen-label"})
+            linux = preflight.check_host_labels(
+                (alpha,),
+                actual_hostname="linux-box",
+                host_platform="linux",
+            )
+            darwin = preflight.check_host_labels(
+                (alpha,),
+                actual_hostname="mac-box",
+                host_platform="darwin",
+            )
+        self.assertEqual(linux.status, "INFO")
+        self.assertEqual(darwin.status, "INFO")
+        self.assertIn("operator-configured", linux.detail)
+        self.assertIn("operator-configured", darwin.detail)
+        self.assertIn("chosen-label", linux.detail)
+        self.assertIn("chosen-label", darwin.detail)
+        self.assertIn("linux-box", linux.detail)
+        self.assertIn("mac-box", darwin.detail)
+
+    def test_host_labels_luca_is_remote_source_info_without_hostname(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            luca = root / "luca.json"
+            _write_json(luca, {"face": "luca", "host": "custom-remote"})
             remote_luca = preflight.check_host_labels(
                 (luca,),
                 actual_hostname="unrelated-operator-host",
                 host_platform="linux",
-                shipped_configs=shipped,
             )
-            _write_json(alpha, {"face": "alpha", "host": "chosen-label"})
-            configured_alpha = preflight.check_host_labels(
-                (alpha,),
-                actual_hostname="different-hostname",
-                host_platform="linux",
-                shipped_configs=shipped,
-            )
-            _write_json(luca, {"face": "luca", "host": 42})
-            invalid = preflight.check_host_labels(
-                (luca,),
-                actual_hostname="machine",
-                host_platform="linux",
-                shipped_configs=shipped,
-            )
-        self.assertEqual(mac_alpha.status, "INFO")
-        self.assertEqual(linux_alpha.status, "WARN")
-        self.assertIn("workstation-default", linux_alpha.detail)
         self.assertEqual(remote_luca.status, "INFO")
         self.assertIn("comparison skipped", remote_luca.detail)
         self.assertNotIn("unrelated-operator-host", remote_luca.detail)
-        self.assertEqual(configured_alpha.status, "INFO")
-        self.assertEqual(invalid.status, "WARN")
+
+    def test_host_labels_invalid_configs_are_red_and_exit_one(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            malformed = root / "malformed.json"
+            malformed.write_text("{not json}\n", encoding="utf-8")
+            missing_host = root / "missing-host.json"
+            _write_json(missing_host, {"face": "alpha"})
+            non_string_host = root / "non-string-host.json"
+            _write_json(non_string_host, {"face": "alpha", "host": 42})
+
+            malformed_result = preflight.check_host_labels(
+                (malformed,),
+                actual_hostname="machine",
+                host_platform="linux",
+            )
+            missing_host_result = preflight.check_host_labels(
+                (missing_host,),
+                actual_hostname="machine",
+                host_platform="linux",
+            )
+            non_string_host_result = preflight.check_host_labels(
+                (non_string_host,),
+                actual_hostname="machine",
+                host_platform="linux",
+            )
+        self.assertEqual(malformed_result.status, "RED")
+        self.assertEqual(preflight.exit_code_for((malformed_result,)), 1)
+        self.assertEqual(missing_host_result.status, "RED")
+        self.assertEqual(preflight.exit_code_for((missing_host_result,)), 1)
+        self.assertEqual(non_string_host_result.status, "RED")
+        self.assertEqual(preflight.exit_code_for((non_string_host_result,)), 1)
 
     def test_soul_alert_green_red_skip_and_undetermined(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

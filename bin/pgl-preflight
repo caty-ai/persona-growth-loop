@@ -44,6 +44,8 @@ _UNIT_LABELS = (
     "ai.caty.pgl.mirror-weekly-luca",
 )
 
+_SHIPPED_HOST_LABELS = {"alpha": "mbp", "luca": "vps-hermes"}
+
 
 @dataclass(frozen=True)
 class CheckResult:
@@ -459,22 +461,11 @@ def check_host_labels(
     *,
     actual_hostname: str,
     host_platform: str,
-    shipped_configs: Mapping[str, Path] | None = None,
 ) -> CheckResult:
-    shipped_configs = shipped_configs or {
-        "alpha": REPO_ROOT / "config" / "obs-collector.json",
-        "luca": REPO_ROOT / "config" / "obs-collector-luca.json",
-    }
     warnings: list[str] = []
     information: list[str] = []
     faces: list[str] = []
     try:
-        shipped: dict[str, dict[str, object]] = {
-            face: _load_json(path) for face, path in shipped_configs.items()
-        }
-        local_default = shipped.get("alpha", {}).get("host")
-        if not isinstance(local_default, str) or not local_default:
-            raise ValueError("shipped alpha collector host must be a non-empty string")
         for config_path in collector_configs:
             payload = _load_json(config_path)
             face = payload.get("face", config_path.stem)
@@ -484,17 +475,10 @@ def check_host_labels(
             configured = payload.get("host")
             if not isinstance(configured, str) or not configured:
                 raise ValueError(f"{config_path}: host must be a non-empty string")
-            shipped_payload = shipped.get(face)
-            if shipped_payload is None:
+            shipped_default = _SHIPPED_HOST_LABELS.get(face)
+            if shipped_default is None:
                 raise ValueError(f"no shipped collector config for face={face}")
-            shipped_default = shipped_payload.get("host")
-            if not isinstance(shipped_default, str) or not shipped_default:
-                raise ValueError(f"shipped {face} collector host must be a non-empty string")
-            source = shipped_payload.get("source")
-            is_remote = shipped_default != local_default or (
-                isinstance(source, dict) and isinstance(source.get("ssh_host"), str)
-            )
-            if is_remote:
+            if face == "luca":
                 information.append(
                     f"{face}={configured} is a remote-source label; local hostname comparison skipped"
                 )
@@ -509,7 +493,7 @@ def check_host_labels(
                     f"{face}={configured} is operator-configured (local hostname={actual_hostname})"
                 )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        return CheckResult("host-label", "WARN", str(exc))
+        return CheckResult("host-label", "RED", str(exc))
     name = f"host-label-{faces[0]}" if len(faces) == 1 else "host-label"
     detail = "; ".join(warnings + information)
     if warnings:
