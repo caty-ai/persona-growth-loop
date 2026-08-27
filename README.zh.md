@@ -22,7 +22,7 @@ Persona Growth Loop（PGL）让长期运行的 AI 智能体从真实对话中<br
 
 </div>
 <!-- repo-state:begin (generated; do not edit) -->
-<p align="center"><sub>generation: <code>6935c82</code> (2026-08-26T19:56:28Z) · verify: <a href="https://api.github.com/repos/caty-ai/persona-growth-loop/commits/feat/repo-state-caller-37">API HEAD</a> · <a href="./status.json">status.json</a></sub></p>
+<p align="center"><sub>generation: <code>ec64135</code> (2026-08-27T02:49:04Z) · verify: <a href="https://api.github.com/repos/caty-ai/persona-growth-loop/commits/main">API HEAD</a> · <a href="./status.json">status.json</a></sub></p>
 <!-- repo-state:end -->
 
 ---
