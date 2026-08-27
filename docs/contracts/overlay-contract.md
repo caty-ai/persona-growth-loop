@@ -102,7 +102,7 @@ applier は提案 phrase を以下で検証し、1件でも該当すれば**そ�
 | 二人称 | 二人称主語で始まる（あなた / お前 / 君 + は・が・も）reject |
 | 否定命令 | 〜するな / 〜しないで / 〜禁止 reject |
 | 権限・ツール・承認語彙 | 承認 / 許可 / 権限 / 実行 / 削除 / sudo / rm / push / merge / commit / token / password / key / secret / パスワード / 秘密 を含む reject |
-| URL・パス様 | `://` / `/Users/` / `~/` / `\\` を含む reject |
+| URL・パス様 | `://` / `/Users/` / `~/` / `\\` を含む reject（platform 注記・非規範: `/Users/` は macOS のホーム接頭辞で、Linux/WSL2 相当は `/home/` — 現行の字面リストには含まれない。字面リストの変更は本注記の範囲外で、変更手続は本表直下の運用規定に従う） |
 | コード様 | バッククォート / `{}` / `;` / `$(` を含む reject |
 | 数字列 | 5桁以上の連続数字を含む reject |
 
@@ -135,7 +135,7 @@ applier は提案 phrase を以下で検証し、1件でも該当すれば**そ�
    soul 定点ハッシュ基線（§8-2）は applier にとって **read-only**（allowlist 外）
 3. applier は書き込み前後に **soul 定点ハッシュ**（面ごとの soul ファイル集合の sha256 マニフェスト）を照合。
    不一致 = 即中断・全 revert・赤旗通知（自分が壊した場合も外部要因も区別せず停止）
-4. **正直な限界**: 単一ユーザー macOS では、writer プロセスが applier を迂回して直接書くことを OS レベルで
+4. **正直な限界**: 単一ユーザー macOS （platform 注記・非規範: 単一ユーザー Linux/WSL2 でも同様）では、writer プロセスが applier を迂回して直接書くことを OS レベルで
    100%阻止できない。よって非 engine 面は三層防御（path-scoped 仲介 / soul 定点ハッシュ監視 / 規律）であり
    **engine 面（build/budget/E_CATALOG_REF の硬構造が加わる）と同型ではない**（architecture-v1.md §5）
 

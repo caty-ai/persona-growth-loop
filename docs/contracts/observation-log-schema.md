@@ -10,7 +10,7 @@
 
 | 層 | 実体 | 内容 | 同期 |
 |---|---|---|---|
-| **Tier L**（local raw） | `~/.persona-growth-loop/obslog/<face>/YYYY-MM-DD.jsonl`（MBP の PGL_HOME・dir 0700・file 0600） | フィルタ・scrub 済みの発話断片 | **同期禁止**（マシン間・vault いずれも）。バックアップ対象からの除外を推奨（Time Machine 除外は operator 設定・setup チェックで警告） |
+| **Tier L**（local raw） | `~/.persona-growth-loop/obslog/<face>/YYYY-MM-DD.jsonl`（MBP の PGL_HOME・dir 0700・file 0600） | フィルタ・scrub 済みの発話断片 | **同期禁止**（マシン間・vault いずれも）。バックアップ対象からの除外を推奨（Time Machine 除外は operator 設定・setup チェックで警告）（platform 注記・非規範: Time Machine は macOS 固有。Linux/WSL2 では使用するバックアップツール側の除外設定が相当） |
 | **Tier S**（shared） | 共有 vault（オーナー家族の既存 data plane 置き場・private） | **集計値のみ・phrase 本文なし**（§5） | 書き出し前 secret-scan 必須 |
 
 phrase 本文を含むレポート（鏡ディープレポート等）は Tier S に出さず、**オーナー限定置き場**
@@ -48,7 +48,7 @@ lock/killswitch 規律は overlay-contract §9/§10 に従う。session-end hook
 | 3 | `<system-reminder>…</system-reminder>` 全域を除去 |
 | 4 | `<command-name>` / `<command-message>` / `<command-args>` / `<local-command-stdout>` タグ行を除去 |
 | 5 | コードフェンス（``` で囲まれた領域）を除去 |
-| 6 | パス様行（`://` を含む・行頭 `~/` `/` `\\`・`/Users/` を含む）を除去 |
+| 6 | パス様行（`://` を含む・行頭 `~/` `/` `\\`・`/Users/` を含む）を除去（platform 注記・非規範: `/Users/` は macOS のホーム接頭辞で、行中にあっても「を含む」一致で捕捉される。Linux/WSL2 のホーム `/home/…` は行頭に立つ場合のみ行頭 `/` `~/` の規則で除去され、行中の `/home/` 断片は現行規則の捕捉外） |
 | 7 | 断片長 > **240字（コードポイント数）** はその断片ごと**破棄**（貼り付け長文 = 第三者テキストの候補化除外を保存段階で実施。口ぐせ収穫に長文は不要 — データ最小化を兼ねる） |
 | 8 | 鍵様・base64 様はその断片ごと破棄: `AKIA` / `sk-` / `ghp_` / `github_pat_` / `xox` / `-----BEGIN` / `eyJ` 接頭 / `[A-Za-z0-9+/=]{40,}` 連続 |
 | 9 | 面別 denylist（Alpha/Claude Code は `config/obs-denylist.txt` の project/cwd 一致で当該 session 全体、Luca/Hermes は §2.6 の定め〔意図ジャーナル窓 + 受け入れ session 台帳を正本・prefix は第三層〕で除外。粒度 = 台帳/prefix は当該 **session 全体**・ジャーナル窓は**窓内の全行**。断片単位へ狭めない） |
