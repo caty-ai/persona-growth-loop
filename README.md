@@ -22,7 +22,7 @@ only into a separate growth layer, behind a kill switch and one-command rollback
 
 </div>
 <!-- repo-state:begin (generated; do not edit) -->
-<p align="center"><sub>generation: <code>1104675</code> (2026-08-27T06:37:17Z) · verify: <a href="https://api.github.com/repos/caty-ai/persona-growth-loop/commits/main">API HEAD</a> · <a href="./status.json">status.json</a></sub></p>
+<p align="center"><sub>generation: <code>ac5c1d8</code> (2026-08-27T17:12:23Z) · verify: <a href="https://api.github.com/repos/caty-ai/persona-growth-loop/commits/main">API HEAD</a> · <a href="./status.json">status.json</a></sub></p>
 <!-- repo-state:end -->
 
 ---
