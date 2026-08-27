@@ -178,7 +178,7 @@ class MirrorIOTests(unittest.TestCase):
             self.assertTrue(lock.is_dir())
             self.assertTrue(owner.is_file())
 
-    def test_mirror_lock_does_not_reclaim_reacquired_lock_after_stale_observation(self) -> None:
+    def test_mirror_lock_pinned_inode_defeats_simulated_inode_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary).resolve()
             lock = home / "mirror" / "lock.d"
@@ -190,21 +190,44 @@ class MirrorIOTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            real_lstat = os.lstat
+            real_open = os.open
+            stale_metadata = real_lstat(lock)
+            lock_inode_pinned = False
+            lock_replaced = False
+            observed_fds: list[int] = []
+
+            def tracking_open(
+                path: os.PathLike[str] | str, flags: int, mode: int = 0o777
+            ) -> int:
+                nonlocal lock_inode_pinned
+                fd = real_open(path, flags, mode)
+                if Path(path) == lock:
+                    lock_inode_pinned = True
+                    observed_fds.append(fd)
+                return fd
+
+            def fake_lstat(path: os.PathLike[str] | str) -> os.stat_result | SimpleNamespace:
+                result = real_lstat(path)
+                candidate = Path(path)
+                # Model ext4 reusing the released inode only when no directory fd
+                # pinned it. The old tuple-only check then sees a false identity match.
+                if lock_replaced and not lock_inode_pinned and (
+                    candidate == lock or candidate.name.startswith("lock.d.reclaim-")
+                ):
+                    return SimpleNamespace(
+                        st_mode=result.st_mode,
+                        st_dev=stale_metadata.st_dev,
+                        st_ino=stale_metadata.st_ino,
+                        st_mtime=result.st_mtime,
+                    )
+                return result
+
             def replace_with_live_lock(_lock: Path) -> tuple[datetime, int, str]:
-                stale_inode = os.lstat(lock).st_ino
+                nonlocal lock_replaced
                 owner.unlink()
                 lock.rmdir()
-                # ext4 may immediately reuse the freed inode, making the recreated directory
-                # indistinguishable to the production identity check. Decoys deterministically
-                # force the identity-mismatch branch; the coincidence gap is tracked in issue #7.
-                for index in range(8):
-                    (lock.parent / f"decoy-{index}").mkdir()
-                    lock.mkdir()
-                    if os.lstat(lock).st_ino != stale_inode:
-                        break
-                    lock.rmdir()
-                else:
-                    self.fail("could not obtain a distinct lock inode")
+                lock.mkdir()
                 owner.write_text(
                     json.dumps(
                         {
@@ -215,16 +238,77 @@ class MirrorIOTests(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
+                lock_replaced = True
                 return stale, 12345, "old-host"
 
-            with mock.patch(
-                "mirror.common._mirror_lock_owner", side_effect=replace_with_live_lock
-            ):
-                with mirror_lock(home) as acquired:
-                    self.assertFalse(acquired)
+            with mock.patch("mirror.common.os.open", side_effect=tracking_open):
+                with mock.patch("mirror.common.os.lstat", side_effect=fake_lstat):
+                    with mock.patch(
+                        "mirror.common._mirror_lock_owner", side_effect=replace_with_live_lock
+                    ):
+                        with mirror_lock(home) as acquired:
+                            self.assertFalse(acquired)
 
             live_owner = json.loads(owner.read_text(encoding="utf-8"))
             self.assertEqual(live_owner["pid"], 67890)
+            self.assertTrue(lock.is_dir())
+            self.assertEqual(len(observed_fds), 1)
+            with self.assertRaises(OSError):
+                os.fstat(observed_fds[0])
+
+    def test_mirror_lock_closes_pinned_fds_after_reclaim_and_contention(self) -> None:
+        for stale in (True, False):
+            with self.subTest(stale=stale), tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary).resolve()
+                lock = home / "mirror" / "lock.d"
+                lock.mkdir(parents=True)
+                started = datetime.now(timezone.utc) - timedelta(hours=25 if stale else 0)
+                (lock / "owner.json").write_text(
+                    json.dumps(
+                        {"pid": 12345, "host": "host", "started_at": started.isoformat()}
+                    ),
+                    encoding="utf-8",
+                )
+                real_open = os.open
+                real_close = os.close
+                opened: list[int] = []
+                closed: list[int] = []
+
+                def tracking_open(
+                    path: os.PathLike[str] | str, flags: int, mode: int = 0o777
+                ) -> int:
+                    fd = real_open(path, flags, mode)
+                    if Path(path) == lock:
+                        opened.append(fd)
+                    return fd
+
+                def tracking_close(fd: int) -> None:
+                    if fd in opened:
+                        closed.append(fd)
+                    real_close(fd)
+
+                with mock.patch("mirror.common.os.open", side_effect=tracking_open):
+                    with mock.patch("mirror.common.os.close", side_effect=tracking_close):
+                        with mirror_lock(home) as acquired:
+                            self.assertEqual(acquired, stale)
+
+                self.assertGreaterEqual(len(opened), 1)
+                self.assertCountEqual(closed, opened)
+                for fd in opened:
+                    with self.assertRaises(OSError):
+                        os.fstat(fd)
+
+    def test_mirror_lock_vanishing_before_open_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary).resolve()
+            lock = home / "mirror" / "lock.d"
+            lock.mkdir(parents=True)
+            _mark_stale(lock)
+
+            with mock.patch("mirror.common.os.open", side_effect=FileNotFoundError()):
+                with mirror_lock(home) as acquired:
+                    self.assertFalse(acquired)
+
             self.assertTrue(lock.is_dir())
 
     def test_mirror_lock_restores_tombstone_after_post_rename_identity_mismatch(self) -> None:
@@ -488,6 +572,50 @@ class MirrorIOTests(unittest.TestCase):
                 "mirror lock acquisition failed after mkdir; post-mkdir lstat unavailable: snapshot lost",
                 alerts[0],
             )
+
+    def test_mirror_lock_post_mkdir_identity_mismatch_preserves_peer_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary).resolve()
+            lock = home / "mirror" / "lock.d"
+            real_open = os.open
+            real_close = os.close
+            real_fstat = os.fstat
+            opened: list[int] = []
+            closed: list[int] = []
+
+            def replace_then_open(
+                path: os.PathLike[str] | str, flags: int, mode: int = 0o777
+            ) -> int:
+                if Path(path) == lock:
+                    lock.rmdir()
+                    lock.mkdir()
+                    fd = real_open(path, flags, mode)
+                    opened.append(fd)
+                    return fd
+                return real_open(path, flags, mode)
+
+            def mismatched_fstat(fd: int) -> os.stat_result | SimpleNamespace:
+                result = real_fstat(fd)
+                if fd in opened:
+                    return SimpleNamespace(st_dev=result.st_dev, st_ino=result.st_ino + 1)
+                return result
+
+            def tracking_close(fd: int) -> None:
+                if fd in opened:
+                    closed.append(fd)
+                real_close(fd)
+
+            with mock.patch("mirror.common.os.open", side_effect=replace_then_open):
+                with mock.patch("mirror.common.os.fstat", side_effect=mismatched_fstat):
+                    with mock.patch("mirror.common.os.close", side_effect=tracking_close):
+                        with mirror_lock(home) as acquired:
+                            self.assertFalse(acquired)
+
+            self.assertTrue(lock.is_dir())
+            self.assertEqual(len(opened), 1)
+            self.assertCountEqual(closed, opened)
+            with self.assertRaises(OSError):
+                os.fstat(opened[0])
 
     def test_mirror_lock_leaves_unsafe_reclaim_tombstones_with_alerts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
