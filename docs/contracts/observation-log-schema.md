@@ -48,7 +48,7 @@ lock/killswitch 規律は overlay-contract §9/§10 に従う。session-end hook
 | 3 | `<system-reminder>…</system-reminder>` 全域を除去 |
 | 4 | `<command-name>` / `<command-message>` / `<command-args>` / `<local-command-stdout>` タグ行を除去 |
 | 5 | コードフェンス（``` で囲まれた領域）を除去 |
-| 6 | パス様行（`://` を含む・行頭 `~/` `/` `\\`・`/Users/` を含む）を除去 |
+| 6 | パス様行（`://` を含む・行頭 `~/` `/` `\\`・`/Users/` を含む）を除去（platform 注記・非規範: `/Users/` は macOS のホーム接頭辞。Linux/WSL2 のホームパス `/home/…` は行頭 `/` `~/` の規則で同様に除去される） |
 | 7 | 断片長 > **240字（コードポイント数）** はその断片ごと**破棄**（貼り付け長文 = 第三者テキストの候補化除外を保存段階で実施。口ぐせ収穫に長文は不要 — データ最小化を兼ねる） |
 | 8 | 鍵様・base64 様はその断片ごと破棄: `AKIA` / `sk-` / `ghp_` / `github_pat_` / `xox` / `-----BEGIN` / `eyJ` 接頭 / `[A-Za-z0-9+/=]{40,}` 連続 |
 | 9 | 面別 denylist（Alpha/Claude Code は `config/obs-denylist.txt` の project/cwd 一致で当該 session 全体、Luca/Hermes は §2.6 の定め〔意図ジャーナル窓 + 受け入れ session 台帳を正本・prefix は第三層〕で除外。粒度 = 台帳/prefix は当該 **session 全体**・ジャーナル窓は**窓内の全行**。断片単位へ狭めない） |
