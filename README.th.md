@@ -22,7 +22,7 @@ Persona Growth Loop (PGL) ช่วยให้ AI เอเจนต์ที�
 
 </div>
 <!-- repo-state:begin (generated; do not edit) -->
-<p align="center"><sub>generation: <code>ac5c1d8</code> (2026-08-27T17:12:23Z) · verify: <a href="https://api.github.com/repos/caty-ai/persona-growth-loop/commits/main">API HEAD</a> · <a href="./status.json">status.json</a></sub></p>
+<p align="center"><sub>generation: <code>db3c902</code> (2026-08-29T02:53:02Z) · verify: <a href="https://api.github.com/repos/caty-ai/persona-growth-loop/commits/main">API HEAD</a> · <a href="./status.json">status.json</a></sub></p>
 <!-- repo-state:end -->
 
 ---
