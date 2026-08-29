@@ -4,14 +4,14 @@
   "generator_version": "repo-state-gen v1",
   "repo": "caty-ai/persona-growth-loop",
   "stamp_mode": "auto",
-  "generated_at": "2026-08-29T09:34:10Z",
-  "describes_commit": "53ef85806a1e0c1ef903c2bee4fe83f685209c14",
-  "describes_commit_date": "2026-08-29T09:34:10Z",
+  "generated_at": "2026-08-29T18:28:15Z",
+  "describes_commit": "41bbe1605ea86d88e187e7c996cfc6e174601364",
+  "describes_commit_date": "2026-08-29T18:28:15Z",
   "branch": "main",
   "latest_tag": "v0.4.0",
   "latest_release_url": "https://github.com/caty-ai/persona-growth-loop/releases/tag/v0.4.0",
   "agents_entry": null,
   "canonical_api": "https://api.github.com/repos/caty-ai/persona-growth-loop/commits/main",
-  "canonical_raw": "https://raw.githubusercontent.com/caty-ai/persona-growth-loop/53ef85806a1e0c1ef903c2bee4fe83f685209c14/status.json",
+  "canonical_raw": "https://raw.githubusercontent.com/caty-ai/persona-growth-loop/41bbe1605ea86d88e187e7c996cfc6e174601364/status.json",
   "freshness_contract": "SHA comparison only; dates may only ever trigger distrust. Protocol: docs/repo-state/spec.md, section 'Reader protocol'."
 }
